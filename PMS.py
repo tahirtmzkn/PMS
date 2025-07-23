@@ -84,9 +84,9 @@ class PingWorker(QObject):
         self.timeout = timeout
 
     def run(self):
+        timeout_sec = max(1, int(self.timeout / 1000))
         for index, device in enumerate(self.devices):
             try:
-                timeout_sec = max(1, int(self.timeout / 1000))
                 result = subprocess.run(
                     ["ping", "-I", self.interface_name, "-c", "1", "-W", str(timeout_sec), device.ip],
                     stdout=subprocess.DEVNULL,
@@ -113,14 +113,13 @@ class PingMonitor(QWidget):
         super().__init__()
         self.setWindowTitle("PMS")
         self.devices: List[Device] = []
-        self.ping_interval = 1  # seconds
-        self.ping_timeout = 1000  # ms
-        self.interface_name = "enp3s0"  # default interface
+        self.ping_interval = 1
+        self.ping_timeout = 1000
+        self.interface_name = "enp3s0"
         self.running = False
-        self.timer = QTimer()
+        self.timer = QTimer(self)
         self.timer.timeout.connect(self.ping_all)
         self.unnamed_count = 0
-
         self.toggle_btn = None
 
         self.init_ui()
@@ -128,21 +127,20 @@ class PingMonitor(QWidget):
     def init_ui(self):
         layout = QVBoxLayout(self)
 
+        # Header logo
         filigran_layout = QHBoxLayout()
         filigran_layout.setAlignment(Qt.AlignCenter)
-
         filigran = QLabel()
         pixmap = QPixmap(resource_path("icons/ping-pong.ico"))
         filigran.setPixmap(pixmap.scaled(40, 40, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         filigran.setAlignment(Qt.AlignCenter)
-
         watermark_box = QVBoxLayout()
         watermark_box.addWidget(filigran)
         watermark_box.setAlignment(Qt.AlignCenter)
-
         filigran_layout.addLayout(watermark_box)
         layout.addLayout(filigran_layout)
 
+        # Input row
         self.ip_input = QLineEdit()
         self.ip_input.setPlaceholderText("IP address")
         self.name_input = QLineEdit()
@@ -151,8 +149,8 @@ class PingMonitor(QWidget):
         add_btn = QPushButton("Add")
         add_btn.clicked.connect(lambda: self.add_device(self.ip_input.text(), self.name_input.text()))
 
-        self.ip_input.returnPressed.connect(lambda: self.add_device(self.ip_input.text(), self.name_input.text()))
-        self.name_input.returnPressed.connect(lambda: self.add_device(self.ip_input.text(), self.name_input.text()))
+        self.ip_input.returnPressed.connect(add_btn.click)
+        self.name_input.returnPressed.connect(add_btn.click)
 
         top_layout = QHBoxLayout()
         top_layout.addWidget(self.ip_input)
@@ -160,6 +158,7 @@ class PingMonitor(QWidget):
         top_layout.addWidget(add_btn)
         layout.addLayout(top_layout)
 
+        # Table
         self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(["Name", "IP", "Success", "Fail", "Total", ""])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -167,17 +166,17 @@ class PingMonitor(QWidget):
         self.table.verticalHeader().setDefaultSectionSize(30)
         self.table.verticalHeader().setFixedWidth(60)
         self.table.setSortingEnabled(False)
-
         layout.addWidget(self.table)
 
+        # Control buttons
         btn_layout = QHBoxLayout()
         self.toggle_btn = QPushButton("Start")
         self.toggle_btn.setStyleSheet("background-color: green; color: white;")
         self.toggle_btn.clicked.connect(self.toggle_start_stop)
 
         clear_btn = QPushButton("Clear")
-        settings_btn = QPushButton("Settings")
         clear_btn.clicked.connect(self.clear_stats)
+        settings_btn = QPushButton("Settings")
         settings_btn.clicked.connect(self.open_settings)
 
         btn_layout.addWidget(self.toggle_btn)
@@ -231,17 +230,12 @@ class PingMonitor(QWidget):
             self.table.setItem(idx, 3, QTableWidgetItem(str(device.fail)))
             self.table.setItem(idx, 4, QTableWidgetItem(str(device.total)))
 
-            old_widget = self.table.cellWidget(idx, 5)
-            if old_widget is None:
-                remove_btn = QPushButton()
-                remove_btn.setIcon(QIcon(resource_path("icons/trash.ico")))
-                remove_btn.setToolTip("Remove this device")
-                remove_btn.setStyleSheet("border: none; background: none; padding: 2px;")
-                remove_btn.clicked.connect(lambda _, i=idx: self.remove_device(i))
-                self.table.setCellWidget(idx, 5, remove_btn)
-            else:
-                old_widget.clicked.disconnect()
-                old_widget.clicked.connect(lambda _, i=idx: self.remove_device(i))
+            remove_btn = QPushButton()
+            remove_btn.setIcon(QIcon(resource_path("icons/trash.ico")))
+            remove_btn.setToolTip("Remove this device")
+            remove_btn.setStyleSheet("border: none; background: none; padding: 2px;")
+            remove_btn.clicked.connect(lambda _, i=idx: self.remove_device(i))
+            self.table.setCellWidget(idx, 5, remove_btn)
 
             self.color_row(idx, device)
 
