@@ -10,10 +10,10 @@ try:
         QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
         QLineEdit, QLabel, QTableWidget, QTableWidgetItem, QMessageBox,
         QHeaderView, QSpinBox, QDialog, QFormLayout, QAbstractItemView,
-        QComboBox, QMainWindow
+        QComboBox, QMainWindow, QSizePolicy
     )
     from PyQt5.QtCore import Qt, QTimer, QObject, pyqtSignal, QThread
-    from PyQt5.QtGui import QIcon, QPixmap
+    from PyQt5.QtGui import QIcon, QPixmap, QColor, QFont
 except ModuleNotFoundError:
     print("PyQt5 is not installed. Please install it using:")
     print("    pip install PyQt5")
@@ -112,6 +112,7 @@ class PingMonitor(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("PMS")
+        self.setStyleSheet("background-color: #f0f4f8;")
         self.devices: List[Device] = []
         self.ping_interval = 1
         self.ping_timeout = 1000
@@ -125,40 +126,85 @@ class PingMonitor(QWidget):
         self.init_ui()
 
     def init_ui(self):
-        layout = QVBoxLayout(self)
+        main_layout = QVBoxLayout(self)
 
-        # Header logo
-        filigran_layout = QHBoxLayout()
-        filigran_layout.setAlignment(Qt.AlignCenter)
-        filigran = QLabel()
+        # Üst satır: icon + sol inputlar + esnek boşluk + sağ butonlar
+        top_layout = QHBoxLayout()
+        main_layout.addLayout(top_layout)
+
+        # Sol: icon
+        icon_label = QLabel()
         pixmap = QPixmap(resource_path("icons/ping-pong.ico"))
-        filigran.setPixmap(pixmap.scaled(40, 40, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        filigran.setAlignment(Qt.AlignCenter)
-        watermark_box = QVBoxLayout()
-        watermark_box.addWidget(filigran)
-        watermark_box.setAlignment(Qt.AlignCenter)
-        filigran_layout.addLayout(watermark_box)
-        layout.addLayout(filigran_layout)
+        icon_label.setPixmap(pixmap.scaled(40, 40, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        icon_label.setAlignment(Qt.AlignCenter)
+        icon_label.setFixedWidth(50)  # sabit genişlik
+        top_layout.addWidget(icon_label)
 
-        # Input row
+        # Iconun sağında, alt alta IP, Device Name ve Add butonu (küçültülmüş)
+        left_inputs_layout = QVBoxLayout()
+        top_layout.addLayout(left_inputs_layout)
+
         self.ip_input = QLineEdit()
         self.ip_input.setPlaceholderText("IP address")
+        self.ip_input.setFixedWidth(150)
+        self.ip_input.setStyleSheet("""
+            padding: 6px;
+            border: 2px solid #0078d7;
+            border-radius: 6px;
+            background-color: #e6f0fb;
+            font-weight: bold;
+        """)
+        left_inputs_layout.addWidget(self.ip_input)
+
         self.name_input = QLineEdit()
         self.name_input.setPlaceholderText("Device Name (optional)")
+        self.name_input.setFixedWidth(150)
+        self.name_input.setStyleSheet("""
+            padding: 6px;
+            border: 2px solid #0078d7;
+            border-radius: 6px;
+            background-color: #e6f0fb;
+            font-weight: bold;
+        """)
+        left_inputs_layout.addWidget(self.name_input)
 
         add_btn = QPushButton("Add")
+        add_btn.setFixedWidth(150)  # küçültüldü
+        add_btn.setStyleSheet("padding: 6px; background-color: #0078d7; color: white; border-radius: 6px;")
         add_btn.clicked.connect(lambda: self.add_device(self.ip_input.text(), self.name_input.text()))
-
         self.ip_input.returnPressed.connect(add_btn.click)
         self.name_input.returnPressed.connect(add_btn.click)
+        left_inputs_layout.addWidget(add_btn)
 
-        top_layout = QHBoxLayout()
-        top_layout.addWidget(self.ip_input)
-        top_layout.addWidget(self.name_input)
-        top_layout.addWidget(add_btn)
-        layout.addLayout(top_layout)
+        # Orta esnek boşluk
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        top_layout.addWidget(spacer)
 
-        # Table
+        # Sağda, alt alta butonlar (büyütülmüş ve sağa hizalı)
+        right_btns_layout = QVBoxLayout()
+        right_btns_layout.setAlignment(Qt.AlignTop | Qt.AlignRight)
+        top_layout.addLayout(right_btns_layout)
+
+        self.toggle_btn = QPushButton("Start")
+        self.toggle_btn.setFixedWidth(150)
+        self.toggle_btn.setStyleSheet("background-color: #28a745; color: white; padding: 12px; border-radius: 6px;")
+        self.toggle_btn.clicked.connect(self.toggle_start_stop)
+        right_btns_layout.addWidget(self.toggle_btn)
+
+        clear_btn = QPushButton("Clear")
+        clear_btn.setFixedWidth(150)
+        clear_btn.setStyleSheet("padding: 12px; background-color: #ffc107; border-radius: 6px;")
+        clear_btn.clicked.connect(self.clear_stats)
+        right_btns_layout.addWidget(clear_btn)
+
+        settings_btn = QPushButton("Settings")
+        settings_btn.setFixedWidth(150)
+        settings_btn.setStyleSheet("padding: 12px; background-color: #17a2b8; color: white; border-radius: 6px;")
+        settings_btn.clicked.connect(self.open_settings)
+        right_btns_layout.addWidget(settings_btn)
+
+        # Tablo aynı kaldı
         self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(["Name", "IP", "Success", "Fail", "Total", ""])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -166,23 +212,9 @@ class PingMonitor(QWidget):
         self.table.verticalHeader().setDefaultSectionSize(30)
         self.table.verticalHeader().setFixedWidth(60)
         self.table.setSortingEnabled(False)
-        layout.addWidget(self.table)
+        self.table.setStyleSheet("QTableWidget { background-color: white; border: 1px solid #ccc; font-size: 14px; }")
+        main_layout.addWidget(self.table)
 
-        # Control buttons
-        btn_layout = QHBoxLayout()
-        self.toggle_btn = QPushButton("Start")
-        self.toggle_btn.setStyleSheet("background-color: green; color: white;")
-        self.toggle_btn.clicked.connect(self.toggle_start_stop)
-
-        clear_btn = QPushButton("Clear")
-        clear_btn.clicked.connect(self.clear_stats)
-        settings_btn = QPushButton("Settings")
-        settings_btn.clicked.connect(self.open_settings)
-
-        btn_layout.addWidget(self.toggle_btn)
-        btn_layout.addWidget(clear_btn)
-        btn_layout.addWidget(settings_btn)
-        layout.addLayout(btn_layout)
 
     def toggle_start_stop(self):
         if self.running:
@@ -194,14 +226,14 @@ class PingMonitor(QWidget):
         self.running = True
         self.timer.start(self.ping_interval * 1000)
         self.toggle_btn.setText("Stop")
-        self.toggle_btn.setStyleSheet("background-color: red; color: white;")
+        self.toggle_btn.setStyleSheet("background-color: #dc3545; color: white; padding: 8px; border-radius: 6px;")
 
     def stop(self):
         self.running = False
         self.timer.stop()
         self.refresh_table()
         self.toggle_btn.setText("Start")
-        self.toggle_btn.setStyleSheet("background-color: green; color: white;")
+        self.toggle_btn.setStyleSheet("background-color: #28a745; color: white; padding: 8px; border-radius: 6px;")
 
     def add_device(self, ip: str, name: str):
         if not ip:
@@ -242,9 +274,10 @@ class PingMonitor(QWidget):
         self.table.verticalScrollBar().setValue(scroll_pos)
 
     def color_row(self, row: int, device: Device):
-        color = Qt.white
         if self.running:
-            color = Qt.green if device.last_result else Qt.red
+            color = QColor("#00c853") if device.last_result else QColor("#d50000")
+        else:
+            color = QColor("#ffffff")
         for col in range(self.table.columnCount() - 1):
             item = self.table.item(row, col)
             if item:
