@@ -12,10 +12,11 @@ try:
     from PyQt5.QtWidgets import (
         QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
         QLineEdit, QLabel, QTableWidget, QTableWidgetItem, QMessageBox,
-        QHeaderView, QSpinBox, QDialog, QFormLayout, QAbstractItemView, QComboBox
+        QHeaderView, QSpinBox, QDialog, QFormLayout, QAbstractItemView,
+        QComboBox, QMainWindow
     )
     from PyQt5.QtCore import Qt, QTimer
-    from PyQt5.QtGui import QIcon
+    from PyQt5.QtGui import QIcon, QPixmap
 except ModuleNotFoundError:
     print("PyQt5 is not installed. Please install it using:")
     print("    pip install PyQt5")
@@ -57,7 +58,6 @@ class SettingsDialog(QDialog):
         self.timeout_spin.setValue(parent.ping_timeout)
         layout.addRow("Ping Timeout (ms):", self.timeout_spin)
 
-        # Network interface input (QLineEdit)
         self.interface_input = QLineEdit()
         self.interface_input.setText(parent.interface_name)
         layout.addRow("Network Interface:", self.interface_input)
@@ -96,6 +96,27 @@ class PingMonitor(QWidget):
     def init_ui(self):
         layout = QVBoxLayout(self)
 
+        filigran_layout = QHBoxLayout()
+        filigran_layout.setAlignment(Qt.AlignCenter)
+
+        filigran = QLabel()
+        pixmap = QPixmap(resource_path("icons/ping-pong.ico"))
+        filigran.setPixmap(pixmap.scaled(40, 40, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        filigran.setAlignment(Qt.AlignCenter)
+
+        # label = QLabel("PMS")
+        # label.setAlignment(Qt.AlignCenter)
+        # label.setStyleSheet("color: gray; font-weight: bold; font-size: 12px;")
+
+        watermark_box = QVBoxLayout()
+        watermark_box.addWidget(filigran)
+        # watermark_box.addWidget(label)
+        watermark_box.setAlignment(Qt.AlignCenter)
+
+        filigran_layout.addLayout(watermark_box)
+        layout.addLayout(filigran_layout)
+
+
         self.ip_input = QLineEdit()
         self.ip_input.setPlaceholderText("IP address")
         self.name_input = QLineEdit()
@@ -118,7 +139,7 @@ class PingMonitor(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.verticalHeader().setDefaultSectionSize(30)
-        self.table.verticalHeader().setFixedWidth(50)
+        self.table.verticalHeader().setFixedWidth(60)
         self.table.setSortingEnabled(False)
 
         layout.addWidget(self.table)
