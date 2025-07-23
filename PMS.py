@@ -1,8 +1,5 @@
-# PMS.py
-
 import sys
 import subprocess
-import threading
 import time
 import os
 from dataclasses import dataclass
@@ -15,7 +12,7 @@ try:
         QHeaderView, QSpinBox, QDialog, QFormLayout, QAbstractItemView,
         QComboBox, QMainWindow
     )
-    from PyQt5.QtCore import Qt, QTimer
+    from PyQt5.QtCore import Qt, QTimer, QObject, pyqtSignal, QThread
     from PyQt5.QtGui import QIcon, QPixmap
 except ModuleNotFoundError:
     print("PyQt5 is not installed. Please install it using:")
@@ -76,6 +73,41 @@ class SettingsDialog(QDialog):
         return self.interface_input.text().strip()
 
 
+class PingWorker(QObject):
+    finished = pyqtSignal()
+    update_device = pyqtSignal(int, Device)
+
+    def __init__(self, devices, interface_name, timeout):
+        super().__init__()
+        self.devices = devices
+        self.interface_name = interface_name
+        self.timeout = timeout
+
+    def run(self):
+        for index, device in enumerate(self.devices):
+            try:
+                timeout_sec = max(1, int(self.timeout / 1000))
+                result = subprocess.run(
+                    ["ping", "-I", self.interface_name, "-c", "1", "-W", str(timeout_sec), device.ip],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=timeout_sec + 1
+                )
+                device.total += 1
+                if result.returncode == 0:
+                    device.success += 1
+                    device.last_result = True
+                else:
+                    device.fail += 1
+                    device.last_result = False
+            except Exception:
+                device.fail += 1
+                device.total += 1
+                device.last_result = False
+            self.update_device.emit(index, device)
+        self.finished.emit()
+
+
 class PingMonitor(QWidget):
     def __init__(self):
         super().__init__()
@@ -104,18 +136,12 @@ class PingMonitor(QWidget):
         filigran.setPixmap(pixmap.scaled(40, 40, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         filigran.setAlignment(Qt.AlignCenter)
 
-        # label = QLabel("PMS")
-        # label.setAlignment(Qt.AlignCenter)
-        # label.setStyleSheet("color: gray; font-weight: bold; font-size: 12px;")
-
         watermark_box = QVBoxLayout()
         watermark_box.addWidget(filigran)
-        # watermark_box.addWidget(label)
         watermark_box.setAlignment(Qt.AlignCenter)
 
         filigran_layout.addLayout(watermark_box)
         layout.addLayout(filigran_layout)
-
 
         self.ip_input = QLineEdit()
         self.ip_input.setPlaceholderText("IP address")
@@ -247,35 +273,23 @@ class PingMonitor(QWidget):
                 self.timer.start(self.ping_interval * 1000)
 
     def ping_all(self):
-        threads = []
-        for index, device in enumerate(self.devices):
-            t = threading.Thread(target=self.ping_device, args=(device, index))
-            t.start()
-            threads.append(t)
-        for t in threads:
-            t.join()
-        self.refresh_table()
+        self.thread = QThread()
+        self.worker = PingWorker(self.devices, self.interface_name, self.ping_timeout)
+        self.worker.moveToThread(self.thread)
 
-    def ping_device(self, device: Device, index: int):
-        try:
-            timeout_sec = max(1, int(self.ping_timeout / 1000))
-            result = subprocess.run(
-                ["ping", "-I", self.interface_name, "-c", "1", "-W", str(timeout_sec), device.ip],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=timeout_sec + 1
-            )
-            device.total += 1
-            if result.returncode == 0:
-                device.success += 1
-                device.last_result = True
-            else:
-                device.fail += 1
-                device.last_result = False
-        except (subprocess.TimeoutExpired, Exception):
-            device.fail += 1
-            device.total += 1
-            device.last_result = False
+        self.thread.started.connect(self.worker.run)
+        self.worker.update_device.connect(self.update_device_row)
+        self.worker.finished.connect(self.thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
+
+        self.thread.start()
+
+    def update_device_row(self, index, device):
+        self.color_row(index, device)
+        self.table.item(index, 2).setText(str(device.success))
+        self.table.item(index, 3).setText(str(device.fail))
+        self.table.item(index, 4).setText(str(device.total))
 
 
 def main():
