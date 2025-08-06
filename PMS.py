@@ -1,23 +1,17 @@
 import sys
 import subprocess
-import time
 import os
 from dataclasses import dataclass
 from typing import List
 
-try:
-    from PyQt5.QtWidgets import (
-        QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-        QLineEdit, QLabel, QTableWidget, QTableWidgetItem, QMessageBox,
-        QHeaderView, QSpinBox, QDialog, QFormLayout, QAbstractItemView,
-        QComboBox, QMainWindow, QSizePolicy
-    )
-    from PyQt5.QtCore import Qt, QTimer, QObject, pyqtSignal, QThread
-    from PyQt5.QtGui import QIcon, QPixmap, QColor, QFont
-except ModuleNotFoundError:
-    print("PyQt5 is not installed. Please install it using:")
-    print("    pip install PyQt5")
-    sys.exit(1)
+from PyQt5.QtWidgets import (
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+    QLineEdit, QLabel, QTableWidget, QTableWidgetItem, QMessageBox,
+    QHeaderView, QSpinBox, QDialog, QFormLayout, QAbstractItemView,
+    QSizePolicy
+)
+from PyQt5.QtCore import Qt, QTimer, QObject, pyqtSignal, QRunnable, QThreadPool, pyqtSlot
+from PyQt5.QtGui import QIcon, QPixmap, QColor
 
 
 def resource_path(relative_path):
@@ -73,39 +67,42 @@ class SettingsDialog(QDialog):
         return self.interface_input.text().strip()
 
 
-class PingWorker(QObject):
-    finished = pyqtSignal()
+class PingSignals(QObject):
     update_device = pyqtSignal(int, Device)
 
-    def __init__(self, devices, interface_name, timeout):
+
+class PingTask(QRunnable):
+    def __init__(self, index, device, interface_name, timeout, signals):
         super().__init__()
-        self.devices = devices
+        self.index = index
+        self.device = device
         self.interface_name = interface_name
         self.timeout = timeout
+        self.signals = signals
 
+    @pyqtSlot()
     def run(self):
         timeout_sec = max(1, int(self.timeout / 1000))
-        for index, device in enumerate(self.devices):
-            try:
-                result = subprocess.run(
-                    ["ping", "-I", self.interface_name, "-c", "1", "-W", str(timeout_sec), device.ip],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=timeout_sec + 1
-                )
-                device.total += 1
-                if result.returncode == 0:
-                    device.success += 1
-                    device.last_result = True
-                else:
-                    device.fail += 1
-                    device.last_result = False
-            except Exception:
-                device.fail += 1
-                device.total += 1
-                device.last_result = False
-            self.update_device.emit(index, device)
-        self.finished.emit()
+        try:
+            result = subprocess.run(
+                ["ping", "-I", self.interface_name, "-c", "1", "-W", str(timeout_sec), self.device.ip],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=timeout_sec + 1
+            )
+            self.device.total += 1
+            if result.returncode == 0:
+                self.device.success += 1
+                self.device.last_result = True
+            else:
+                self.device.fail += 1
+                self.device.last_result = False
+        except Exception:
+            self.device.fail += 1
+            self.device.total += 1
+            self.device.last_result = False
+
+        self.signals.update_device.emit(self.index, self.device)
 
 
 class PingMonitor(QWidget):
@@ -121,32 +118,33 @@ class PingMonitor(QWidget):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.ping_all)
         self.unnamed_count = 0
-        self.toggle_btn = None
+        self.is_pinging = False
+        self.pending_tasks = 0
+
+        self.thread_pool = QThreadPool()
+        self.thread_pool.setMaxThreadCount(10)
 
         self.init_ui()
 
     def init_ui(self):
         main_layout = QVBoxLayout(self)
 
-        # Üst satır: icon + sol inputlar + esnek boşluk + sağ butonlar
         top_layout = QHBoxLayout()
         main_layout.addLayout(top_layout)
 
-        # Sol: icon
         icon_label = QLabel()
         pixmap = QPixmap(resource_path("icons/ping-pong.ico"))
         icon_label.setPixmap(pixmap.scaled(40, 40, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         icon_label.setAlignment(Qt.AlignCenter)
-        icon_label.setFixedWidth(50)  # sabit genişlik
+        icon_label.setFixedWidth(50)
         top_layout.addWidget(icon_label)
 
-        # Iconun sağında, alt alta IP, Device Name ve Add butonu (küçültülmüş)
         left_inputs_layout = QVBoxLayout()
         top_layout.addLayout(left_inputs_layout)
 
         self.ip_input = QLineEdit()
         self.ip_input.setPlaceholderText("IP address")
-        self.ip_input.setFixedWidth(150)
+        self.ip_input.setFixedWidth(250)
         self.ip_input.setStyleSheet("""
             padding: 6px;
             border: 2px solid #0078d7;
@@ -158,7 +156,7 @@ class PingMonitor(QWidget):
 
         self.name_input = QLineEdit()
         self.name_input.setPlaceholderText("Device Name (optional)")
-        self.name_input.setFixedWidth(150)
+        self.name_input.setFixedWidth(250)
         self.name_input.setStyleSheet("""
             padding: 6px;
             border: 2px solid #0078d7;
@@ -169,42 +167,39 @@ class PingMonitor(QWidget):
         left_inputs_layout.addWidget(self.name_input)
 
         add_btn = QPushButton("Add")
-        add_btn.setFixedWidth(150)  # küçültüldü
+        add_btn.setFixedWidth(250)
         add_btn.setStyleSheet("padding: 6px; background-color: #0078d7; color: white; border-radius: 6px;")
         add_btn.clicked.connect(lambda: self.add_device(self.ip_input.text(), self.name_input.text()))
         self.ip_input.returnPressed.connect(add_btn.click)
         self.name_input.returnPressed.connect(add_btn.click)
         left_inputs_layout.addWidget(add_btn)
 
-        # Orta esnek boşluk
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         top_layout.addWidget(spacer)
 
-        # Sağda, alt alta butonlar (büyütülmüş ve sağa hizalı)
         right_btns_layout = QVBoxLayout()
         right_btns_layout.setAlignment(Qt.AlignTop | Qt.AlignRight)
         top_layout.addLayout(right_btns_layout)
 
         self.toggle_btn = QPushButton("Start")
-        self.toggle_btn.setFixedWidth(150)
+        self.toggle_btn.setFixedWidth(250)
         self.toggle_btn.setStyleSheet("background-color: #28a745; color: white; padding: 12px; border-radius: 6px;")
         self.toggle_btn.clicked.connect(self.toggle_start_stop)
         right_btns_layout.addWidget(self.toggle_btn)
 
         clear_btn = QPushButton("Clear")
-        clear_btn.setFixedWidth(150)
+        clear_btn.setFixedWidth(250)
         clear_btn.setStyleSheet("padding: 12px; background-color: #ffc107; border-radius: 6px;")
         clear_btn.clicked.connect(self.clear_stats)
         right_btns_layout.addWidget(clear_btn)
 
         settings_btn = QPushButton("Settings")
-        settings_btn.setFixedWidth(150)
+        settings_btn.setFixedWidth(250)
         settings_btn.setStyleSheet("padding: 12px; background-color: #17a2b8; color: white; border-radius: 6px;")
         settings_btn.clicked.connect(self.open_settings)
         right_btns_layout.addWidget(settings_btn)
 
-        # Tablo aynı kaldı
         self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(["Name", "IP", "Success", "Fail", "Total", ""])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -214,7 +209,6 @@ class PingMonitor(QWidget):
         self.table.setSortingEnabled(False)
         self.table.setStyleSheet("QTableWidget { background-color: white; border: 1px solid #ccc; font-size: 14px; }")
         main_layout.addWidget(self.table)
-
 
     def toggle_start_stop(self):
         if self.running:
@@ -226,14 +220,15 @@ class PingMonitor(QWidget):
         self.running = True
         self.timer.start(self.ping_interval * 1000)
         self.toggle_btn.setText("Stop")
-        self.toggle_btn.setStyleSheet("background-color: #dc3545; color: white; padding: 8px; border-radius: 6px;")
+        self.toggle_btn.setStyleSheet("background-color: #dc3545; color: white; padding: 12px; border-radius: 6px;")
 
     def stop(self):
         self.running = False
         self.timer.stop()
+        self.is_pinging = False
         self.refresh_table()
         self.toggle_btn.setText("Start")
-        self.toggle_btn.setStyleSheet("background-color: #28a745; color: white; padding: 8px; border-radius: 6px;")
+        self.toggle_btn.setStyleSheet("background-color: #28a745; color: white; padding: 12px; border-radius: 6px;")
 
     def add_device(self, ip: str, name: str):
         if not ip:
@@ -300,17 +295,24 @@ class PingMonitor(QWidget):
                 self.timer.start(self.ping_interval * 1000)
 
     def ping_all(self):
-        self.thread = QThread()
-        self.worker = PingWorker(self.devices, self.interface_name, self.ping_timeout)
-        self.worker.moveToThread(self.thread)
+        if self.is_pinging or not self.devices:
+            return
 
-        self.thread.started.connect(self.worker.run)
-        self.worker.update_device.connect(self.update_device_row)
-        self.worker.finished.connect(self.thread.quit)
-        self.worker.finished.connect(self.worker.deleteLater)
-        self.thread.finished.connect(self.thread.deleteLater)
+        self.is_pinging = True
+        self.pending_tasks = len(self.devices)
 
-        self.thread.start()
+        def on_task_done(index, device):
+            self.update_device_row(index, device)
+            self.pending_tasks -= 1
+            if self.pending_tasks == 0:
+                self.is_pinging = False
+                self.refresh_table()
+
+        for idx, device in enumerate(self.devices):
+            signals = PingSignals()
+            signals.update_device.connect(on_task_done)
+            task = PingTask(idx, device, self.interface_name, self.ping_timeout, signals)
+            self.thread_pool.start(task)
 
     def update_device_row(self, index, device):
         self.color_row(index, device)
