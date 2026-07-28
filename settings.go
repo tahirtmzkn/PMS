@@ -2,11 +2,13 @@ package main
 
 import (
 	"fmt"
+	"net"
+	"sort"
 	"strconv"
 	"strings"
 
 	"fyne.io/fyne/v2"
-	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
 )
 
@@ -28,39 +30,80 @@ func intRangeValidator(min, max int) fyne.StringValidator {
 	}
 }
 
-func (pm *appState) openSettings() {
+// listInterfaces returns the machine's network interface names, sorted.
+func listInterfaces() []string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(ifaces))
+	for _, iface := range ifaces {
+		names = append(names, iface.Name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// buildSettingsPanel builds the inline (initially hidden) settings row shown
+// under the top bar. Each field applies immediately once valid; changing the
+// interval or interface while running restarts the ticker so it takes effect
+// on the next cycle instead of waiting for a manual Stop/Start.
+func (pm *appState) buildSettingsPanel() *fyne.Container {
 	intervalEntry := widget.NewEntry()
 	intervalEntry.SetText(strconv.Itoa(pm.pingInterval))
 	intervalEntry.Validator = intRangeValidator(1, 0)
+	intervalEntry.OnChanged = func(s string) {
+		n, err := strconv.Atoi(strings.TrimSpace(s))
+		if err != nil || n < 1 {
+			return
+		}
+		pm.pingInterval = n
+		if pm.running {
+			pm.startTicker()
+		}
+	}
 
 	timeoutEntry := widget.NewEntry()
 	timeoutEntry.SetText(strconv.Itoa(pm.pingTimeout))
 	timeoutEntry.Validator = intRangeValidator(100, 10000)
-
-	ifaceEntry := widget.NewEntry()
-	ifaceEntry.SetText(pm.interfaceName)
-
-	items := []*widget.FormItem{
-		widget.NewFormItem("Ping Interval (s)", intervalEntry),
-		widget.NewFormItem("Ping Timeout (ms)", timeoutEntry),
-		widget.NewFormItem("Network Interface", ifaceEntry),
-	}
-
-	dialog.NewForm("Settings", "Save", "Cancel", items, func(confirmed bool) {
-		if !confirmed {
+	timeoutEntry.OnChanged = func(s string) {
+		n, err := strconv.Atoi(strings.TrimSpace(s))
+		if err != nil || n < 100 || n > 10000 {
 			return
 		}
-		interval, _ := strconv.Atoi(intervalEntry.Text)
-		timeout, _ := strconv.Atoi(timeoutEntry.Text)
-		iface := strings.TrimSpace(ifaceEntry.Text)
+		pm.pingTimeout = n
+	}
 
-		pm.pingInterval = interval
-		pm.pingTimeout = timeout
-		if iface != "" {
-			pm.interfaceName = iface
+	pm.ifaceSelect = widget.NewSelect(listInterfaces(), func(s string) {
+		if s == "" {
+			return
 		}
+		pm.interfaceName = s
 		if pm.running {
 			pm.startTicker()
 		}
-	}, pm.win).Show()
+	})
+	pm.ifaceSelect.SetSelected(pm.interfaceName)
+
+	row := container.NewHBox(
+		widget.NewLabel("Interval (s)"), fixedWidth(70, intervalEntry),
+		widget.NewLabel("Timeout (ms)"), fixedWidth(90, timeoutEntry),
+		widget.NewLabel("Interface"), fixedWidth(160, pm.ifaceSelect),
+	)
+
+	panel := container.NewVBox(widget.NewSeparator(), container.NewPadded(row))
+	panel.Hide()
+	return panel
+}
+
+// toggleSettings shows/hides the inline settings panel, refreshing the
+// interface list each time it's opened.
+func (pm *appState) toggleSettings() {
+	if pm.settingsPanel.Visible() {
+		pm.settingsPanel.Hide()
+	} else {
+		pm.ifaceSelect.SetOptions(listInterfaces())
+		pm.settingsPanel.Show()
+	}
+	pm.topBox.Refresh()
 }

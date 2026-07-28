@@ -49,7 +49,10 @@ type appState struct {
 	rows          []*deviceRow
 	rowsContainer *fyne.Container
 
-	toggleBtn *widget.Button
+	toggleBtn     *widget.Button
+	topBox        *fyne.Container
+	settingsPanel *fyne.Container
+	ifaceSelect   *widget.Select
 }
 
 func newAppState(win fyne.Window, trashIcon fyne.Resource) *appState {
@@ -102,7 +105,7 @@ func (pm *appState) buildUI(pingPongIcon fyne.Resource) fyne.CanvasObject {
 	clearBtn := widget.NewButton("Clear", pm.clearStats)
 	clearBtn.Importance = widget.WarningImportance
 
-	settingsBtn := widget.NewButton("Settings", pm.openSettings)
+	settingsBtn := widget.NewButton("Settings", pm.toggleSettings)
 
 	right := container.NewVBox(
 		fixedWidth(controlWidth, pm.toggleBtn),
@@ -111,6 +114,8 @@ func (pm *appState) buildUI(pingPongIcon fyne.Resource) fyne.CanvasObject {
 	)
 
 	topBar := container.NewHBox(icon, left, layout.NewSpacer(), right)
+
+	pm.settingsPanel = pm.buildSettingsPanel()
 
 	bold := fyne.TextStyle{Bold: true}
 	header := container.NewGridWithColumns(6,
@@ -122,10 +127,10 @@ func (pm *appState) buildUI(pingPongIcon fyne.Resource) fyne.CanvasObject {
 		widget.NewLabel(""),
 	)
 
-	top := container.NewVBox(topBar, widget.NewSeparator(), header)
+	pm.topBox = container.NewVBox(topBar, pm.settingsPanel, widget.NewSeparator(), header)
 	scroll := container.NewVScroll(pm.rowsContainer)
 
-	return container.NewBorder(top, nil, nil, nil, scroll)
+	return container.NewBorder(pm.topBox, nil, nil, nil, scroll)
 }
 
 func (pm *appState) addDevice(ip, name string) {

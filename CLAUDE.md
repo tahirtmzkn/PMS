@@ -44,8 +44,13 @@ sudo apt install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
   stay bound to the right row index. `refreshRows` fully rebuilds all rows (and rebinds each
   remove button's closure to its current index) after structural changes (add/remove/clear/stop);
   `updateRowResult` is the cheap per-cycle path that only touches one row's counters/color.
-- `settings.go` — the Settings dialog (`dialog.NewForm` + validated `widget.Entry` fields for
-  interval/timeout, plain `Entry` for interface name).
+- `settings.go` — an inline settings panel (not a modal dialog): a hidden-by-default row under
+  the top bar, toggled by the Settings button (`appState.toggleSettings`, which calls
+  `topBox.Refresh()` after `Show()`/`Hide()` since Fyne box layouts skip hidden children only
+  once their parent re-lays-out). Validated `widget.Entry` fields for interval/timeout apply on
+  every valid `OnChanged`; interface is a `widget.Select` populated from `net.Interfaces()`
+  (refreshed each time the panel opens) rather than free text. Changing the interval or interface
+  while running calls `startTicker()` again so it takes effect on the next cycle.
 - `main.go` — embeds `assets/*.png` via `//go:embed`, sets app metadata, builds the window.
 - `packaging/` — `pms.desktop` + `build-deb.sh`, which hand-rolls a `DEBIAN/control` +
   `usr/bin`/`usr/share/...` tree and calls `dpkg-deb --build` (no extra packaging tool required;
