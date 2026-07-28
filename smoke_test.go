@@ -19,7 +19,8 @@ func TestSmokeBuildUI(t *testing.T) {
 	win.SetContent(content)
 	win.Resize(fyne.NewSize(1200, 700))
 
-	// A blank name triggers an SNMP lookup; stub it so no test forks snmpget.
+	// Every device gets an SNMP hostname lookup; stub it so no test forks
+	// snmpget.
 	pm.lookupName = func(ip, iface string) string { return "" }
 
 	// Waiting on the lookup before touching the table again is a test-driver
@@ -27,12 +28,16 @@ func TestSmokeBuildUI(t *testing.T) {
 	// of marshalling it to a UI thread, so an outstanding lookup would other-
 	// wise land in the middle of the next refreshRows.
 	<-pm.addDevice("10.0.0.2", "")
-	pm.addDevice("9.0.0.1", "Beta")
+	<-pm.addDevice("9.0.0.1", "Beta")
 	if len(pm.devices) != 2 {
 		t.Fatalf("expected 2 devices, got %d", len(pm.devices))
 	}
-	if pm.devices[0].Name != "Unknown" {
-		t.Errorf("unresolvable name = %q, want Unknown", pm.devices[0].Name)
+	// A blank name is "Unknown" — the Name column is never filled in from SNMP.
+	if pm.devices[0].Name != unknownName {
+		t.Errorf("blank name = %q, want %q", pm.devices[0].Name, unknownName)
+	}
+	if pm.devices[0].Hostname != emptyHostname {
+		t.Errorf("unresolvable hostname = %q, want %q", pm.devices[0].Hostname, emptyHostname)
 	}
 
 	// numeric IP ordering, not lexicographic
@@ -59,7 +64,7 @@ func TestSmokeBuildUI(t *testing.T) {
 	// never-pinged devices stay grouped ahead of measured ones.
 	pm.devices[0].Fail, pm.devices[0].Total = 1, 10 // 10%
 	pm.devices[1].Fail, pm.devices[1].Total = 5, 10 // 50%
-	pm.addDevice("10.0.0.9", "Unpinged")
+	<-pm.addDevice("10.0.0.9", "Unpinged")
 	pm.sortBy(sortLoss)
 	if pm.devices[0].Name != "Unpinged" || pm.devices[2].Fail != 5 {
 		t.Errorf("loss sort asc = %v", []string{pm.devices[0].Name, pm.devices[1].Name, pm.devices[2].Name})
@@ -102,8 +107,9 @@ func TestRowReorder(t *testing.T) {
 	win.SetContent(pm.buildUI(fyne.NewStaticResource("ping-pong.png", pingPongPNG)))
 	win.Resize(fyne.NewSize(1200, 700))
 
+	pm.lookupName = func(ip, iface string) string { return "" }
 	for _, ip := range []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"} {
-		pm.addDevice(ip, ip)
+		<-pm.addDevice(ip, ip)
 	}
 	pm.sortBy(sortIP) // an active sort, whose arrow a manual reorder must drop
 	first := pm.devices[0]
@@ -202,11 +208,12 @@ func TestRowReorder(t *testing.T) {
 	}
 }
 
-// TestNameLookup covers naming a device from SNMP: the placeholder while the
-// query is in flight, the resolved name landing on both the device and its row,
-// the "Unknown" fallback when nothing answers, and a device removed mid-query.
+// TestHostnameLookup covers the Hostname column: the placeholder while the SNMP
+// query is in flight, the answer landing on both the device and its row, the
+// "Empty" fallback when nothing answers, the Name column being left alone either
+// way (typed name kept, blank name "Unknown"), and a device removed mid-query.
 // The lookup is stubbed and parked on a channel so none of this races.
-func TestNameLookup(t *testing.T) {
+func TestHostnameLookup(t *testing.T) {
 	a := test.NewApp()
 	defer a.Quit()
 
@@ -225,35 +232,44 @@ func TestNameLookup(t *testing.T) {
 
 	resolved := pm.addDevice("10.0.0.1", "")
 	device := pm.devices[0]
-	if device.Name != resolvingName {
-		t.Errorf("name while resolving = %q, want %q", device.Name, resolvingName)
+	if device.Hostname != resolvingHostname {
+		t.Errorf("hostname while resolving = %q, want %q", device.Hostname, resolvingHostname)
 	}
 	close(release)
 	<-resolved
-	if device.Name != "sw-core-01" {
-		t.Errorf("resolved name = %q, want sw-core-01", device.Name)
+	if device.Hostname != "sw-core-01" {
+		t.Errorf("resolved hostname = %q, want sw-core-01", device.Hostname)
 	}
-	if got := pm.rowFor(device).name.Text; got != "sw-core-01" {
+	if got := pm.rowFor(device).hostname.Text; got != "sw-core-01" {
 		t.Errorf("resolved row label = %q, want sw-core-01", got)
 	}
-
-	// a device that answers nothing keeps the old "Unknown" behaviour
-	<-pm.addDevice("10.0.0.2", "")
-	if got := pm.devices[1].Name; got != unknownName {
-		t.Errorf("unanswered name = %q, want %q", got, unknownName)
+	// a resolved hostname does not become the device's name
+	if device.Name != unknownName {
+		t.Errorf("blank name after resolving = %q, want %q", device.Name, unknownName)
 	}
 
-	// an explicit name is used as given, with no lookup started at all
-	if ch := pm.addDevice("10.0.0.3", "Named"); ch != nil {
-		t.Errorf("explicit name started a lookup")
+	// nothing answered: the Hostname column says so rather than staying on the
+	// placeholder
+	<-pm.addDevice("10.0.0.2", "")
+	if got := pm.devices[1].Hostname; got != emptyHostname {
+		t.Errorf("unanswered hostname = %q, want %q", got, emptyHostname)
+	}
+
+	// a typed name is kept exactly as given; the SNMP answer only fills Hostname
+	<-pm.addDevice("10.0.0.1", "Named")
+	named := pm.devices[2]
+	if named.Name != "Named" || named.Hostname != "sw-core-01" {
+		t.Errorf("named device = %q / %q, want Named / sw-core-01", named.Name, named.Hostname)
+	}
+	if got := pm.rowFor(named).name.Text; got != "Named" {
+		t.Errorf("named row label = %q, want Named", got)
 	}
 
 	// removing a device mid-query drops the answer instead of panicking
-	gone := pm.devices[2]
 	pm.removeDevice(2)
-	pm.applyResolvedName(gone, "too-late")
-	if gone.Name != "Named" {
-		t.Errorf("removed device was renamed to %q", gone.Name)
+	pm.applyResolvedHostname(named, "too-late")
+	if named.Hostname != "sw-core-01" {
+		t.Errorf("removed device's hostname was overwritten with %q", named.Hostname)
 	}
 }
 
@@ -326,17 +342,19 @@ func TestStatusLine(t *testing.T) {
 	pm := newAppState(win, fyne.NewStaticResource("trash.png", trashPNG))
 	win.SetContent(pm.buildUI(fyne.NewStaticResource("ping-pong.png", pingPongPNG)))
 
+	pm.lookupName = func(ip, iface string) string { return "" }
+
 	if got := pm.statusLabel.Text; got != "No devices" {
 		t.Errorf("empty status = %q", got)
 	}
 
-	pm.addDevice("10.0.0.1", "a")
+	<-pm.addDevice("10.0.0.1", "a")
 	if got := pm.statusLabel.Text; got != "Stopped  ·  1 device" {
 		t.Errorf("stopped status = %q", got)
 	}
 
-	pm.addDevice("10.0.0.2", "b")
-	pm.addDevice("10.0.0.3", "c")
+	<-pm.addDevice("10.0.0.2", "b")
+	<-pm.addDevice("10.0.0.3", "c")
 	pm.running = true
 	pm.devices[0].Total, pm.devices[0].LastResult = 3, true
 	pm.devices[1].Total, pm.devices[1].LastResult = 3, false

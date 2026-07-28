@@ -38,21 +38,25 @@ type deviceRow struct {
 	device *Device
 	// lifted marks the row as picked up by its grip: drawn above its
 	// neighbours with an opaque background so it hides what it passes over.
-	lifted  bool
-	bg      *canvas.Rectangle
-	name    *widget.Label
-	success *widget.Label
-	fail    *widget.Label
-	total   *widget.Label
-	loss    *widget.Label
-	content fyne.CanvasObject
+	lifted   bool
+	bg       *canvas.Rectangle
+	name     *widget.Label
+	hostname *widget.Label
+	success  *widget.Label
+	fail     *widget.Label
+	total    *widget.Label
+	loss     *widget.Label
+	content  fyne.CanvasObject
 }
 
 const (
-	// unknownName is what a device is called when nothing could name it, and
-	// resolvingName the placeholder shown while its SNMP lookup is in flight.
-	unknownName   = "Unknown"
-	resolvingName = "Resolving…"
+	// unknownName is the Name column's stand-in for a device added with the name
+	// box left blank. emptyHostname is what the Hostname column shows when
+	// nothing answered the SNMP query, and resolvingHostname the placeholder
+	// while it's in flight.
+	unknownName       = "Unknown"
+	emptyHostname     = "Empty"
+	resolvingHostname = "Resolving…"
 )
 
 // sortColumn identifies which column the table is currently sorted by.
@@ -61,6 +65,7 @@ type sortColumn int
 const (
 	sortNone sortColumn = iota
 	sortName
+	sortHostname
 	sortIP
 	sortSuccess
 	sortFail
@@ -85,8 +90,8 @@ type appState struct {
 	rows          []*deviceRow
 	rowsContainer *fyne.Container
 
-	// colWidths holds the current width of the Name/IP/Success/Fail/Total/Loss
-	// columns, user-adjustable by dragging the header resizers.
+	// colWidths holds the current width of the Name/Hostname/IP/Success/Fail/
+	// Total/Loss columns, user-adjustable by dragging the header resizers.
 	colWidths []float32
 
 	// controlHeight is the shared height of every entry/button/select.
@@ -115,6 +120,7 @@ type appState struct {
 	statusLabel    *widget.Label
 	ifaceSelect    *widget.Select
 	nameHeaderBtn  *widget.Button
+	hostHeaderBtn  *widget.Button
 	ipHeaderBtn    *widget.Button
 	successHeader  *widget.Button
 	failHeaderBtn  *widget.Button
@@ -129,10 +135,13 @@ func newAppState(win fyne.Window, trashIcon fyne.Resource) *appState {
 		pingInterval:  1,
 		pingTimeout:   1000,
 		interfaceName: "enp3s0",
-		colWidths:     []float32{220, 160, 125, 125, 125, 125},
-		rowOffsets:    map[fyne.CanvasObject]float32{},
-		rowAnims:      map[fyne.CanvasObject]*fyne.Animation{},
-		lookupName:    snmpSysName,
+		// Seven columns have to fit the default 1200px window alongside the
+		// dividers and the two trailing button cells, or the row overflows and
+		// the grip/remove buttons land off-screen; a drag widens any of them.
+		colWidths:  []float32{170, 200, 140, 110, 110, 110, 110},
+		rowOffsets: map[fyne.CanvasObject]float32{},
+		rowAnims:   map[fyne.CanvasObject]*fyne.Animation{},
+		lookupName: snmpSysName,
 	}
 	pm.rowsContainer = container.New(rowsLayout{
 		slots:  pm.slotObjects,
@@ -182,7 +191,7 @@ func (pm *appState) buildUI(pingPongIcon fyne.Resource) fyne.CanvasObject {
 	ipEntry := widget.NewEntry()
 	ipEntry.SetPlaceHolder("IP Address")
 	nameEntry := widget.NewEntry()
-	nameEntry.SetPlaceHolder("Name (SNMP if blank)")
+	nameEntry.SetPlaceHolder("Name (optional)")
 
 	addBtn := widget.NewButton("Add", func() {
 		pm.addDevice(ipEntry.Text, nameEntry.Text)
@@ -221,6 +230,7 @@ func (pm *appState) buildUI(pingPongIcon fyne.Resource) fyne.CanvasObject {
 	settingsRow := pm.buildSettingsPanel()
 
 	pm.nameHeaderBtn = pm.newHeaderButton("Name", sortName)
+	pm.hostHeaderBtn = pm.newHeaderButton("Hostname", sortHostname)
 	pm.ipHeaderBtn = pm.newHeaderButton("IP", sortIP)
 	pm.successHeader = pm.newHeaderButton("Success", sortSuccess)
 	pm.failHeaderBtn = pm.newHeaderButton("Fail", sortFail)
@@ -241,11 +251,12 @@ func (pm *appState) buildUI(pingPongIcon fyne.Resource) fyne.CanvasObject {
 
 	headerRow = container.NewHBox(
 		pm.columnCell(0, pm.nameHeaderBtn), newResizer(0),
-		pm.columnCell(1, pm.ipHeaderBtn), newResizer(1),
-		pm.columnCell(2, pm.successHeader), newResizer(2),
-		pm.columnCell(3, pm.failHeaderBtn), newResizer(3),
-		pm.columnCell(4, pm.totalHeaderBtn), newResizer(4),
-		pm.columnCell(5, pm.lossHeaderBtn), newResizer(5),
+		pm.columnCell(1, pm.hostHeaderBtn), newResizer(1),
+		pm.columnCell(2, pm.ipHeaderBtn), newResizer(2),
+		pm.columnCell(3, pm.successHeader), newResizer(3),
+		pm.columnCell(4, pm.failHeaderBtn), newResizer(4),
+		pm.columnCell(5, pm.totalHeaderBtn), newResizer(5),
+		pm.columnCell(6, pm.lossHeaderBtn), newResizer(6),
 		layout.NewSpacer(),
 		// Two blanks: one per trailing button cell (grip, remove), so the
 		// header lines up with the rows.
@@ -327,11 +338,12 @@ func plural(n int, word string) string {
 	return fmt.Sprintf("%d %ss", n, word)
 }
 
-// addDevice appends a device to the table. A blank name is not a plain
-// "Unknown" any more: the row goes up with a placeholder and an SNMP sysName
-// lookup is started for the IP, which fills the name in when it answers. The
-// returned channel closes once that lookup's result has reached the UI (nil
-// when no lookup was needed) — the app ignores it, tests wait on it.
+// addDevice appends a device to the table. The Name column is what the user
+// typed, or "Unknown" when the box was left blank — it is never filled in from
+// SNMP. The Hostname column always is: the row goes up with a placeholder there
+// and the lookup fills it in when it answers. The returned channel closes once
+// that lookup's result has reached the UI (nil if no device was added) — the app
+// ignores it, tests wait on it.
 func (pm *appState) addDevice(ip, name string) <-chan struct{} {
 	ip = strings.TrimSpace(ip)
 	if ip == "" {
@@ -339,50 +351,46 @@ func (pm *appState) addDevice(ip, name string) <-chan struct{} {
 		return nil
 	}
 	name = strings.TrimSpace(name)
-
-	device := &Device{IP: ip, Name: name}
-	resolve := name == ""
-	if resolve {
-		device.Name = resolvingName
+	if name == "" {
+		name = unknownName
 	}
+
+	device := &Device{IP: ip, Name: name, Hostname: resolvingHostname}
 	pm.devices = append(pm.devices, device)
 	pm.refreshRows()
 
-	if !resolve {
-		return nil
-	}
-	return pm.startNameLookup(device)
+	return pm.startHostnameLookup(device)
 }
 
-// startNameLookup names a device from its SNMP sysName. The query is a
+// startHostnameLookup asks a device for its SNMP sysName. The query is a
 // subprocess, so it runs on its own goroutine and comes back through fyne.Do;
 // the device is carried by pointer, so sorting, dragging or removing it while
 // the query is in flight is harmless.
-func (pm *appState) startNameLookup(device *Device) <-chan struct{} {
+func (pm *appState) startHostnameLookup(device *Device) <-chan struct{} {
 	// Everything the goroutine needs is read here, on the UI goroutine.
 	lookup, ip, iface := pm.lookupName, device.IP, pm.interfaceName
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		name := lookup(ip, iface)
-		fyne.Do(func() { pm.applyResolvedName(device, name) })
+		host := lookup(ip, iface)
+		fyne.Do(func() { pm.applyResolvedHostname(device, host) })
 	}()
 	return done
 }
 
-// applyResolvedName writes a looked-up name onto a device and its row, falling
-// back to "Unknown" when nothing answered.
-func (pm *appState) applyResolvedName(device *Device, name string) {
+// applyResolvedHostname writes a looked-up sysName onto a device and its row,
+// falling back to "Empty" when nothing answered.
+func (pm *appState) applyResolvedHostname(device *Device, host string) {
 	if pm.indexOf(device) < 0 {
 		return // removed while the query was in flight
 	}
-	if name == "" {
-		name = unknownName
+	if host == "" {
+		host = emptyHostname
 	}
-	device.Name = name
+	device.Hostname = host
 	if row := pm.rowFor(device); row != nil {
-		setLabel(row.name, name)
+		setLabel(row.hostname, host)
 	}
 }
 
@@ -458,6 +466,7 @@ func (pm *appState) newRow(device *Device) *deviceRow {
 	bg.CornerRadius = 6
 
 	nameLbl := widget.NewLabel(device.Name)
+	hostLbl := widget.NewLabel(device.Hostname)
 	ipLbl := widget.NewLabel(device.IP)
 	successLbl := widget.NewLabel(strconv.Itoa(device.Success))
 	failLbl := widget.NewLabel(strconv.Itoa(device.Fail))
@@ -476,17 +485,18 @@ func (pm *appState) newRow(device *Device) *deviceRow {
 
 	grid := container.NewHBox(
 		pm.columnCell(0, nameLbl), blankGap(resizerWidth),
-		pm.columnCell(1, ipLbl), blankGap(resizerWidth),
-		pm.columnCell(2, successLbl), blankGap(resizerWidth),
-		pm.columnCell(3, failLbl), blankGap(resizerWidth),
-		pm.columnCell(4, totalLbl), blankGap(resizerWidth),
-		pm.columnCell(5, lossLbl), blankGap(resizerWidth),
+		pm.columnCell(1, hostLbl), blankGap(resizerWidth),
+		pm.columnCell(2, ipLbl), blankGap(resizerWidth),
+		pm.columnCell(3, successLbl), blankGap(resizerWidth),
+		pm.columnCell(4, failLbl), blankGap(resizerWidth),
+		pm.columnCell(5, totalLbl), blankGap(resizerWidth),
+		pm.columnCell(6, lossLbl), blankGap(resizerWidth),
 		layout.NewSpacer(),
 		fixedWidth(removeColWidth, handle),
 		fixedWidth(removeColWidth, removeBtn),
 	)
 
-	row := &deviceRow{device: device, bg: bg, name: nameLbl, success: successLbl, fail: failLbl, total: totalLbl, loss: lossLbl}
+	row := &deviceRow{device: device, bg: bg, name: nameLbl, hostname: hostLbl, success: successLbl, fail: failLbl, total: totalLbl, loss: lossLbl}
 	row.content = container.NewStack(bg, grid)
 	pm.colorRow(row, device)
 	return row
@@ -797,6 +807,8 @@ func (pm *appState) sortBy(col sortColumn) {
 		switch col {
 		case sortName:
 			lt = strings.ToLower(a.Name) < strings.ToLower(b.Name)
+		case sortHostname:
+			lt = strings.ToLower(a.Hostname) < strings.ToLower(b.Hostname)
 		case sortIP:
 			lt = ipLess(a.IP, b.IP)
 		case sortSuccess:
@@ -833,6 +845,7 @@ func (pm *appState) refreshHeaderLabels() {
 		}
 	}
 	set(pm.nameHeaderBtn, "Name", sortName)
+	set(pm.hostHeaderBtn, "Hostname", sortHostname)
 	set(pm.ipHeaderBtn, "IP", sortIP)
 	set(pm.successHeader, "Success", sortSuccess)
 	set(pm.failHeaderBtn, "Fail", sortFail)

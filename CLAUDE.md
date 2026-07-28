@@ -39,8 +39,10 @@ sudo apt install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
 
 ## Architecture
 
-- `device.go` — `Device` struct: one monitored target's IP/name plus running
-  success/fail/total counters and `LastResult`.
+- `device.go` — `Device` struct: one monitored target's IP, user-typed `Name` and SNMP-resolved
+  `Hostname`, plus running success/fail/total counters and `LastResult`. `Name` and `Hostname` are
+  separate on purpose: the name box is optional and its text is the only thing the Name column
+  ever shows, while `Hostname` is always filled in from the device itself.
 - `ping.go` — `pingOne` shells out to the system `ping` binary
   (`ping -n -I <interface> -c 1 -W <fractional_sec> <ip>`). `runCycle` fans a ping out to every
   device concurrently, calling `onResult` as each device finishes and `onDone` once all have.
@@ -100,17 +102,26 @@ sudo apt install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
   Column headers (`newHeaderButton`) are plain `widget.Button`s that call `sortBy`, which toggles
   ascending/descending on repeat clicks of the same column and re-sorts `pm.devices` in place with
   `sort.SliceStable` (IP sorts numerically via `ipLess`/`net.ParseIP`, not lexicographically).
+  The seven columns are Name, Hostname, IP, Success, Fail, Total, Loss, indexed by position in
+  `colWidths` — inserting or moving one means renumbering the `columnCell` calls in *both* the
+  header row and `newRow`, and their default widths have to keep the row inside the 1200px default
+  window or the trailing grip/remove cells get pushed off-screen (the table only scrolls vertically).
   Success/Fail/Total are raw counts; the derived **Loss** column (`formatLoss`) shows
   `fail/total` as a percentage — one decimal, trailing `.0` trimmed, so a single failure in a long
   run doesn't round to `%0`, and `-` before a device's first ping rather than a misleading `%0`.
   Sorting Loss uses the ratio (`lossRatio`), not the fail count, with never-pinged devices keyed
   to `-1` so they group together instead of tying with genuinely 0%-loss devices.
-  Adding a device with the name box left blank no longer just writes `"Unknown"`: the row goes up
-  named `resolvingName` and `startNameLookup` asks the target for its SNMP sysName on a background
-  goroutine, with `applyResolvedName` (via `fyne.Do`) writing the answer — or `unknownName` if
-  nothing replied — onto the device and its row label. The device is carried by pointer, so a
-  sort/drag/remove mid-query is harmless (`indexOf` < 0 means the answer is dropped). `addDevice`
+  The **Name** column is only ever the text from the (optional) name box, or `unknownName`
+  ("Unknown") when it was left blank — it is never written from SNMP. The separate **Hostname**
+  column is what the device calls itself: every added device goes up with
+  `resolvingHostname` there while `startHostnameLookup` asks it for its SNMP sysName on a background
+  goroutine, and `applyResolvedHostname` (via `fyne.Do`) writes the answer — or `emptyHostname`
+  ("Empty") if nothing replied — onto the device and its row label. The lookup runs whether or not
+  a name was typed, since the two columns are independent now. The device is carried by pointer, so
+  a sort/drag/remove mid-query is harmless (`indexOf` < 0 means the answer is dropped). `addDevice`
   returns the lookup's completion channel purely so tests can wait for it; the UI ignores it.
+  So "Unknown" in Name means *you didn't name it*, while "Empty" in Hostname means *it didn't
+  answer* — two different facts that the old single-column behaviour conflated.
 - `snmp.go` — `snmpSysName` shells out to `snmpget` for `sysName.0`. Details worth keeping:
   the OID is written numerically (`1.3.6.1.2.1.1.5.0`) because Debian/Ubuntu's `snmp` package
   disables MIB loading, where the symbolic `SNMPv2-MIB::sysName.0` is rejected outright; `-Oqv`

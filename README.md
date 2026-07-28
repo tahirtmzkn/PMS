@@ -12,7 +12,8 @@ Features
   and Loss counters, and each row green while its last ping answered and red while it didn't.
 - The whole list is pinged at once, so a cycle takes about as long as the timeout no matter how
   many devices are on it.
-- Devices added without a name are named automatically from their own SNMP hostname.
+- Two name columns: **Name** is your own label for the device (optional — blank rows read
+  `Unknown`), while **Hostname** is filled in automatically from the device's own SNMP hostname.
 - A status line summarising how many devices are up, down, or not yet pinged.
 - Sortable and resizable columns, and rows you can drag into the order you want.
 - Interval, timeout and network interface are set in the window and apply immediately.
@@ -25,9 +26,9 @@ Runtime, on Ubuntu/Debian:
 | package | why |
 | --- | --- |
 | `iputils-ping` | the `ping` binary the app shells out to (installed by default) |
-| `snmp` | the `snmpget` binary used for name resolution |
+| `snmp` | the `snmpget` binary used for hostname resolution |
 
-`snmp` is only needed for the naming feature — without it, blank names just stay `Unknown` and
+`snmp` is only needed for the Hostname column — without it that column just reads `Empty` and
 everything else works. The MIB files (`snmp-mibs-downloader`) are **not** required: the app
 queries the numeric OID precisely so it doesn't depend on them. The `.deb` declares both
 packages, so `apt` pulls them in for you.
@@ -66,8 +67,9 @@ Using it
 1. Pick the network interface the devices are reachable through, in the settings row. Every
    ping is sent from that interface (`ping -I`), so this is not cosmetic.
 2. Type an IP address, optionally a name, and press **Add** (or just hit Enter in either
-   field). Leave the name blank to have it resolved over SNMP — the row shows `Resolving…`
-   for a moment and then the device's own hostname.
+   field). The name is your own label and goes in the **Name** column; leave it blank and the row
+   reads `Unknown` there. Either way the **Hostname** column shows `Resolving…` for a moment and
+   then the device's own SNMP hostname, or `Empty` if it didn't answer.
 3. **Start** begins the cycles, **Stop** ends them, **Clear** zeroes every counter without
    touching the list.
 4. Click headers to sort, drag a header divider to resize a column, drag a row's grip to move
@@ -96,15 +98,16 @@ yet, so a list full of unreachable hosts can't build up a backlog. Rows are boun
 by identity, not by list position, so sorting, dragging or removing a device mid-cycle can
 never land one device's counters on another's row.
 
-**Naming.** A blank name triggers, in the background:
+**Hostnames.** Every added device gets, in the background:
 ```
 snmpget -v2c -c public -t 1 -r 1 -Oqv [--clientaddr=<source>] <ip> 1.3.6.1.2.1.1.5.0
 ```
 which is `SNMPv2-MIB::sysName.0` written numerically — the symbolic name only works where the
 MIB files are installed, and Debian/Ubuntu ship the `snmp` package with MIB loading switched
 off. One lookup is bounded at about two seconds, and anything other than a clean answer (no
-reply, no SNMP on the device, `snmpget` not installed, an agent error) leaves the device named
-`Unknown`. `--clientaddr` is only added when the selected interface has an address on the
+reply, no SNMP on the device, `snmpget` not installed, an agent error) leaves the Hostname column
+reading `Empty`. The **Name** column is never touched by this — it stays whatever you typed, or
+`Unknown` if you typed nothing. `--clientaddr` is only added when the selected interface has an address on the
 target's own subnet: one interface routinely carries several subnets, and binding the query to
 the wrong one gets it sent with a source address the device can't reply to. For off-subnet
 targets the kernel's route lookup picks the source instead.
@@ -123,6 +126,6 @@ $ go test ./...                  # headless smoke test
 
 `smoke_test.go` builds the entire UI against Fyne's headless test app — no window opens — and
 exercises adding/removing devices, sorting, the column-resize drag, the row-reorder drag and
-its animation, loss formatting, the status line and SNMP name resolution (with the lookup
+its animation, loss formatting, the status line and SNMP hostname resolution (with the lookup
 stubbed, so tests never fork `snmpget`). It's the intended way to check UI changes, especially
 to the custom widgets, without putting a window on the screen.
