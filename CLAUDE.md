@@ -105,6 +105,26 @@ sudo apt install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
   run doesn't round to `%0`, and `-` before a device's first ping rather than a misleading `%0`.
   Sorting Loss uses the ratio (`lossRatio`), not the fail count, with never-pinged devices keyed
   to `-1` so they group together instead of tying with genuinely 0%-loss devices.
+  Adding a device with the name box left blank no longer just writes `"Unknown"`: the row goes up
+  named `resolvingName` and `startNameLookup` asks the target for its SNMP sysName on a background
+  goroutine, with `applyResolvedName` (via `fyne.Do`) writing the answer — or `unknownName` if
+  nothing replied — onto the device and its row label. The device is carried by pointer, so a
+  sort/drag/remove mid-query is harmless (`indexOf` < 0 means the answer is dropped). `addDevice`
+  returns the lookup's completion channel purely so tests can wait for it; the UI ignores it.
+- `snmp.go` — `snmpSysName` shells out to `snmpget` for `sysName.0`. Details worth keeping:
+  the OID is written numerically (`1.3.6.1.2.1.1.5.0`) because Debian/Ubuntu's `snmp` package
+  disables MIB loading, where the symbolic `SNMPv2-MIB::sysName.0` is rejected outright; `-Oqv`
+  prints the bare value, but `parseSysName` still handles the `OID = STRING: "name"` form and has
+  to reject agent errors ("No Such Object…") itself since those arrive on stdout with exit status
+  0; `-t`/`-r` bound one lookup to ~2s so a row doesn't sit on the placeholder; and the query is
+  sourced from the selected interface (`--clientaddr`) *only* when `interfaceSourceIP` finds an
+  address on that interface whose subnet contains the target. One interface routinely carries
+  several subnets — this desktop's enp3s0 has four — so binding to its first address sent every
+  query out with a source the device couldn't answer, turning every name into "Unknown" while the
+  same query worked by hand. For an off-subnet target the flag is omitted and the kernel's route
+  lookup picks the source, which it does correctly.
+  The community/version are constants, not settings fields — a wrong one just yields "Unknown".
+  `appState.lookupName` holds this function so tests can stub it instead of forking a subprocess.
 - `settings.go` — an always-visible settings row under the toolbar (no button to show/hide it):
   validated `widget.Entry` fields for interval/timeout apply on every valid `OnChanged`; interface
   is a `widget.Select` populated once from `net.Interfaces()` rather than free text. Changing the

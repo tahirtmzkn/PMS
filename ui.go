@@ -40,12 +40,20 @@ type deviceRow struct {
 	// neighbours with an opaque background so it hides what it passes over.
 	lifted  bool
 	bg      *canvas.Rectangle
+	name    *widget.Label
 	success *widget.Label
 	fail    *widget.Label
 	total   *widget.Label
 	loss    *widget.Label
 	content fyne.CanvasObject
 }
+
+const (
+	// unknownName is what a device is called when nothing could name it, and
+	// resolvingName the placeholder shown while its SNMP lookup is in flight.
+	unknownName   = "Unknown"
+	resolvingName = "Resolving…"
+)
 
 // sortColumn identifies which column the table is currently sorted by.
 type sortColumn int
@@ -87,6 +95,10 @@ type appState struct {
 	sortCol sortColumn
 	sortAsc bool
 
+	// lookupName resolves a device's name from its IP (SNMP sysName). A field
+	// rather than a direct call so tests can stub it instead of shelling out.
+	lookupName func(ip, iface string) string
+
 	// dragDevice is the device whose grip is currently being dragged, and
 	// dragOffset the vertical travel accumulated since its last row swap.
 	dragDevice *Device
@@ -120,6 +132,7 @@ func newAppState(win fyne.Window, trashIcon fyne.Resource) *appState {
 		colWidths:     []float32{220, 160, 125, 125, 125, 125},
 		rowOffsets:    map[fyne.CanvasObject]float32{},
 		rowAnims:      map[fyne.CanvasObject]*fyne.Animation{},
+		lookupName:    snmpSysName,
 	}
 	pm.rowsContainer = container.New(rowsLayout{
 		slots:  pm.slotObjects,
@@ -169,7 +182,7 @@ func (pm *appState) buildUI(pingPongIcon fyne.Resource) fyne.CanvasObject {
 	ipEntry := widget.NewEntry()
 	ipEntry.SetPlaceHolder("IP Address")
 	nameEntry := widget.NewEntry()
-	nameEntry.SetPlaceHolder("Device Name (optional)")
+	nameEntry.SetPlaceHolder("Name (SNMP if blank)")
 
 	addBtn := widget.NewButton("Add", func() {
 		pm.addDevice(ipEntry.Text, nameEntry.Text)
@@ -314,18 +327,63 @@ func plural(n int, word string) string {
 	return fmt.Sprintf("%d %ss", n, word)
 }
 
-func (pm *appState) addDevice(ip, name string) {
+// addDevice appends a device to the table. A blank name is not a plain
+// "Unknown" any more: the row goes up with a placeholder and an SNMP sysName
+// lookup is started for the IP, which fills the name in when it answers. The
+// returned channel closes once that lookup's result has reached the UI (nil
+// when no lookup was needed) — the app ignores it, tests wait on it.
+func (pm *appState) addDevice(ip, name string) <-chan struct{} {
 	ip = strings.TrimSpace(ip)
 	if ip == "" {
 		dialog.ShowError(errors.New("please enter an IP address"), pm.win)
-		return
+		return nil
 	}
 	name = strings.TrimSpace(name)
-	if name == "" {
-		name = "Unknown"
+
+	device := &Device{IP: ip, Name: name}
+	resolve := name == ""
+	if resolve {
+		device.Name = resolvingName
 	}
-	pm.devices = append(pm.devices, &Device{IP: ip, Name: name})
+	pm.devices = append(pm.devices, device)
 	pm.refreshRows()
+
+	if !resolve {
+		return nil
+	}
+	return pm.startNameLookup(device)
+}
+
+// startNameLookup names a device from its SNMP sysName. The query is a
+// subprocess, so it runs on its own goroutine and comes back through fyne.Do;
+// the device is carried by pointer, so sorting, dragging or removing it while
+// the query is in flight is harmless.
+func (pm *appState) startNameLookup(device *Device) <-chan struct{} {
+	// Everything the goroutine needs is read here, on the UI goroutine.
+	lookup, ip, iface := pm.lookupName, device.IP, pm.interfaceName
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		name := lookup(ip, iface)
+		fyne.Do(func() { pm.applyResolvedName(device, name) })
+	}()
+	return done
+}
+
+// applyResolvedName writes a looked-up name onto a device and its row, falling
+// back to "Unknown" when nothing answered.
+func (pm *appState) applyResolvedName(device *Device, name string) {
+	if pm.indexOf(device) < 0 {
+		return // removed while the query was in flight
+	}
+	if name == "" {
+		name = unknownName
+	}
+	device.Name = name
+	if row := pm.rowFor(device); row != nil {
+		setLabel(row.name, name)
+	}
 }
 
 func (pm *appState) removeDevice(idx int) {
@@ -428,7 +486,7 @@ func (pm *appState) newRow(device *Device) *deviceRow {
 		fixedWidth(removeColWidth, removeBtn),
 	)
 
-	row := &deviceRow{device: device, bg: bg, success: successLbl, fail: failLbl, total: totalLbl, loss: lossLbl}
+	row := &deviceRow{device: device, bg: bg, name: nameLbl, success: successLbl, fail: failLbl, total: totalLbl, loss: lossLbl}
 	row.content = container.NewStack(bg, grid)
 	pm.colorRow(row, device)
 	return row

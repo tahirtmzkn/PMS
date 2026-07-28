@@ -29,11 +29,14 @@ Version: $VERSION
 Section: net
 Priority: optional
 Architecture: $ARCH
-Depends: libgl1, libx11-6, libxrandr2, libxcursor1, libxinerama1, libxi6, libxxf86vm1, iputils-ping
+Depends: libgl1, libx11-6, libxrandr2, libxcursor1, libxinerama1, libxi6, libxxf86vm1, iputils-ping, snmp
 Maintainer: $(whoami) <$(whoami)@localhost>
 Description: Ping Monitoring System
  GUI to monitor network device liveness via ICMP ping, with live
- success/fail counters and a color-coded status table.
+ success/fail counters and a color-coded status table. Devices added
+ without a name are named from their SNMP sysName (snmpget), which is
+ why the snmp package is a dependency; only the numeric OID is used, so
+ the MIB files (snmp-mibs-downloader) are not needed.
 EOF
 
 mkdir -p dist

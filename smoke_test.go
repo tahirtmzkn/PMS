@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net"
+	"strings"
 	"testing"
 
 	"fyne.io/fyne/v2"
@@ -17,13 +19,20 @@ func TestSmokeBuildUI(t *testing.T) {
 	win.SetContent(content)
 	win.Resize(fyne.NewSize(1200, 700))
 
-	pm.addDevice("10.0.0.2", "")
+	// A blank name triggers an SNMP lookup; stub it so no test forks snmpget.
+	pm.lookupName = func(ip, iface string) string { return "" }
+
+	// Waiting on the lookup before touching the table again is a test-driver
+	// detail: test.NewApp runs fyne.Do inline on the calling goroutine instead
+	// of marshalling it to a UI thread, so an outstanding lookup would other-
+	// wise land in the middle of the next refreshRows.
+	<-pm.addDevice("10.0.0.2", "")
 	pm.addDevice("9.0.0.1", "Beta")
 	if len(pm.devices) != 2 {
 		t.Fatalf("expected 2 devices, got %d", len(pm.devices))
 	}
 	if pm.devices[0].Name != "Unknown" {
-		t.Errorf("default name = %q, want Unknown", pm.devices[0].Name)
+		t.Errorf("unresolvable name = %q, want Unknown", pm.devices[0].Name)
 	}
 
 	// numeric IP ordering, not lexicographic
@@ -190,6 +199,111 @@ func TestRowReorder(t *testing.T) {
 	h.DragEnd()
 	if moved != 12 || !ended {
 		t.Errorf("handle drag = %v, ended = %v", moved, ended)
+	}
+}
+
+// TestNameLookup covers naming a device from SNMP: the placeholder while the
+// query is in flight, the resolved name landing on both the device and its row,
+// the "Unknown" fallback when nothing answers, and a device removed mid-query.
+// The lookup is stubbed and parked on a channel so none of this races.
+func TestNameLookup(t *testing.T) {
+	a := test.NewApp()
+	defer a.Quit()
+
+	win := a.NewWindow("PMS")
+	pm := newAppState(win, fyne.NewStaticResource("trash.png", trashPNG))
+	win.SetContent(pm.buildUI(fyne.NewStaticResource("ping-pong.png", pingPongPNG)))
+
+	release := make(chan struct{})
+	pm.lookupName = func(ip, iface string) string {
+		<-release
+		if ip == "10.0.0.1" {
+			return "sw-core-01"
+		}
+		return ""
+	}
+
+	resolved := pm.addDevice("10.0.0.1", "")
+	device := pm.devices[0]
+	if device.Name != resolvingName {
+		t.Errorf("name while resolving = %q, want %q", device.Name, resolvingName)
+	}
+	close(release)
+	<-resolved
+	if device.Name != "sw-core-01" {
+		t.Errorf("resolved name = %q, want sw-core-01", device.Name)
+	}
+	if got := pm.rowFor(device).name.Text; got != "sw-core-01" {
+		t.Errorf("resolved row label = %q, want sw-core-01", got)
+	}
+
+	// a device that answers nothing keeps the old "Unknown" behaviour
+	<-pm.addDevice("10.0.0.2", "")
+	if got := pm.devices[1].Name; got != unknownName {
+		t.Errorf("unanswered name = %q, want %q", got, unknownName)
+	}
+
+	// an explicit name is used as given, with no lookup started at all
+	if ch := pm.addDevice("10.0.0.3", "Named"); ch != nil {
+		t.Errorf("explicit name started a lookup")
+	}
+
+	// removing a device mid-query drops the answer instead of panicking
+	gone := pm.devices[2]
+	pm.removeDevice(2)
+	pm.applyResolvedName(gone, "too-late")
+	if gone.Name != "Named" {
+		t.Errorf("removed device was renamed to %q", gone.Name)
+	}
+}
+
+func TestParseSysName(t *testing.T) {
+	cases := map[string]string{
+		"sw-core-01\n":   "sw-core-01",
+		"tahir-Dell-G15": "tahir-Dell-G15",
+		"SNMPv2-MIB::sysName.0 = STRING: sw-core-01\n":     "sw-core-01",
+		"iso.3.6.1.2.1.1.5.0 = STRING: \"sw core 01\"\n":   "sw core 01",
+		"SNMPv2-MIB::sysName.0 = No Such Object available": "",
+		"Timeout: No Response from 10.0.0.1.":              "",
+		"":                                                 "",
+		"first line\nsecond line":                          "first line",
+	}
+	for out, want := range cases {
+		if got := parseSysName(out); got != want {
+			t.Errorf("parseSysName(%q) = %q, want %q", out, got, want)
+		}
+	}
+
+	long := strings.Repeat("x", maxSysNameLen+20)
+	if got := parseSysName(long); len(got) != maxSysNameLen {
+		t.Errorf("overlong sysName kept %d chars, want %d", len(got), maxSysNameLen)
+	}
+}
+
+// TestInterfaceSourceIP pins the source-address choice for the SNMP query: it
+// has to be the interface address on the *target's* subnet, not simply the
+// interface's first address — an interface carrying several subnets (a normal
+// setup on the machines this app watches) otherwise gets bound to a source the
+// device cannot reply to, and every lookup silently times out. Uses lo, the one
+// interface whose addressing is the same everywhere.
+func TestInterfaceSourceIP(t *testing.T) {
+	if _, err := net.InterfaceByName("lo"); err != nil {
+		t.Skip("no lo interface")
+	}
+
+	// 127.0.0.1/8 covers the whole 127.x range
+	if got := interfaceSourceIP("lo", "127.0.0.9"); got != "127.0.0.1" {
+		t.Errorf("on-subnet source = %q, want 127.0.0.1", got)
+	}
+	// off-subnet: leave the source to the kernel's route lookup
+	if got := interfaceSourceIP("lo", "10.0.0.3"); got != "" {
+		t.Errorf("off-subnet source = %q, want empty", got)
+	}
+	if got := interfaceSourceIP("nosuchiface0", "127.0.0.1"); got != "" {
+		t.Errorf("unknown interface source = %q, want empty", got)
+	}
+	if got := interfaceSourceIP("lo", "not-an-ip"); got != "" {
+		t.Errorf("unparseable target source = %q, want empty", got)
 	}
 }
 
