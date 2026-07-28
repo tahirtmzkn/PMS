@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"image/color"
+	"math"
+	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -35,12 +39,23 @@ type deviceRow struct {
 	content fyne.CanvasObject
 }
 
+// sortColumn identifies which column the table is currently sorted by.
+type sortColumn int
+
+const (
+	sortNone sortColumn = iota
+	sortName
+	sortIP
+	sortSuccess
+	sortFail
+	sortTotal
+)
+
 type appState struct {
 	win       fyne.Window
 	trashIcon fyne.Resource
 
-	devices      []*Device
-	unnamedCount int
+	devices []*Device
 
 	pingInterval  int // seconds
 	pingTimeout   int // ms
@@ -53,8 +68,16 @@ type appState struct {
 	rows          []*deviceRow
 	rowsContainer *fyne.Container
 
-	toggleBtn   *widget.Button
-	ifaceSelect *widget.Select
+	sortCol sortColumn
+	sortAsc bool
+
+	toggleBtn      *widget.Button
+	ifaceSelect    *widget.Select
+	nameHeaderBtn  *widget.Button
+	ipHeaderBtn    *widget.Button
+	successHeader  *widget.Button
+	failHeaderBtn  *widget.Button
+	totalHeaderBtn *widget.Button
 }
 
 func newAppState(win fyne.Window, trashIcon fyne.Resource) *appState {
@@ -93,11 +116,13 @@ func (pm *appState) buildUI(pingPongIcon fyne.Resource) fyne.CanvasObject {
 	ipEntry.OnSubmitted = func(string) { addBtn.OnTapped() }
 	nameEntry.OnSubmitted = func(string) { addBtn.OnTapped() }
 
+	const toggleWidth = 100
+
 	pm.toggleBtn = widget.NewButton("Start", pm.toggleStartStop)
 	pm.toggleBtn.Importance = widget.SuccessImportance
 
 	clearBtn := widget.NewButton("Clear", pm.clearStats)
-	clearBtn.Importance = widget.MediumImportance
+	clearBtn.Importance = widget.WarningImportance
 
 	// Single-row toolbar: logo, add-device controls on the left, monitor
 	// controls pinned to the right via a spacer — everything on one baseline
@@ -108,19 +133,20 @@ func (pm *appState) buildUI(pingPongIcon fyne.Resource) fyne.CanvasObject {
 		fixedWidth(200, nameEntry),
 		addBtn,
 		layout.NewSpacer(),
-		pm.toggleBtn,
-		clearBtn,
+		fixedWidth(toggleWidth, pm.toggleBtn),
+		fixedWidth(toggleWidth, clearBtn),
 	)
 
 	settingsRow := pm.buildSettingsPanel()
 
-	bold := fyne.TextStyle{Bold: true}
+	pm.nameHeaderBtn = pm.newHeaderButton("Name", sortName)
+	pm.ipHeaderBtn = pm.newHeaderButton("IP", sortIP)
+	pm.successHeader = pm.newHeaderButton("Success", sortSuccess)
+	pm.failHeaderBtn = pm.newHeaderButton("Fail", sortFail)
+	pm.totalHeaderBtn = pm.newHeaderButton("Total", sortTotal)
+
 	header := container.NewGridWithColumns(6,
-		widget.NewLabelWithStyle("Name", fyne.TextAlignLeading, bold),
-		widget.NewLabelWithStyle("IP", fyne.TextAlignLeading, bold),
-		widget.NewLabelWithStyle("Success", fyne.TextAlignLeading, bold),
-		widget.NewLabelWithStyle("Fail", fyne.TextAlignLeading, bold),
-		widget.NewLabelWithStyle("Total", fyne.TextAlignLeading, bold),
+		pm.nameHeaderBtn, pm.ipHeaderBtn, pm.successHeader, pm.failHeaderBtn, pm.totalHeaderBtn,
 		widget.NewLabel(""),
 	)
 
@@ -144,8 +170,7 @@ func (pm *appState) addDevice(ip, name string) {
 	}
 	name = strings.TrimSpace(name)
 	if name == "" {
-		pm.unnamedCount++
-		name = fmt.Sprintf("Switch%d", pm.unnamedCount)
+		name = "Unknown"
 	}
 	pm.devices = append(pm.devices, &Device{IP: ip, Name: name})
 	pm.refreshRows()
@@ -187,7 +212,7 @@ func (pm *appState) newRow(idx int, device *Device) *deviceRow {
 
 	nameLbl := widget.NewLabel(device.Name)
 	ipLbl := widget.NewLabel(device.IP)
-	successLbl := widget.NewLabel(strconv.Itoa(device.Success))
+	successLbl := widget.NewLabel(formatSuccess(device.Success, device.Total))
 	failLbl := widget.NewLabel(strconv.Itoa(device.Fail))
 	totalLbl := widget.NewLabel(strconv.Itoa(device.Total))
 
@@ -224,10 +249,95 @@ func (pm *appState) updateRowResult(idx int, device *Device) {
 		return
 	}
 	row := pm.rows[idx]
-	row.success.SetText(strconv.Itoa(device.Success))
+	row.success.SetText(formatSuccess(device.Success, device.Total))
 	row.fail.SetText(strconv.Itoa(device.Fail))
 	row.total.SetText(strconv.Itoa(device.Total))
 	pm.colorRow(row, device)
+}
+
+// formatSuccess shows the success count alongside its percentage of total
+// pings, e.g. "10 (%50)"; just the count while there's no data yet.
+func formatSuccess(success, total int) string {
+	if total == 0 {
+		return strconv.Itoa(success)
+	}
+	pct := int(math.Round(float64(success) / float64(total) * 100))
+	return fmt.Sprintf("%d (%%%d)", success, pct)
+}
+
+// newHeaderButton makes a column header that sorts the table by col when
+// clicked, toggling ascending/descending on repeated clicks.
+func (pm *appState) newHeaderButton(label string, col sortColumn) *widget.Button {
+	btn := widget.NewButton(label, func() { pm.sortBy(col) })
+	btn.Importance = widget.LowImportance
+	btn.Alignment = widget.ButtonAlignLeading
+	return btn
+}
+
+// sortBy sorts the device list by col, toggling direction if col is already
+// the active sort column, then re-renders the header arrows and table.
+func (pm *appState) sortBy(col sortColumn) {
+	if pm.sortCol == col {
+		pm.sortAsc = !pm.sortAsc
+	} else {
+		pm.sortCol = col
+		pm.sortAsc = true
+	}
+
+	less := func(i, j int) bool {
+		a, b := pm.devices[i], pm.devices[j]
+		var lt bool
+		switch col {
+		case sortName:
+			lt = strings.ToLower(a.Name) < strings.ToLower(b.Name)
+		case sortIP:
+			lt = ipLess(a.IP, b.IP)
+		case sortSuccess:
+			lt = a.Success < b.Success
+		case sortFail:
+			lt = a.Fail < b.Fail
+		case sortTotal:
+			lt = a.Total < b.Total
+		}
+		return lt
+	}
+	if pm.sortAsc {
+		sort.SliceStable(pm.devices, less)
+	} else {
+		sort.SliceStable(pm.devices, func(i, j int) bool { return less(j, i) })
+	}
+
+	pm.refreshHeaderLabels()
+	pm.refreshRows()
+}
+
+func (pm *appState) refreshHeaderLabels() {
+	set := func(btn *widget.Button, label string, col sortColumn) {
+		if pm.sortCol != col {
+			btn.SetText(label)
+			return
+		}
+		if pm.sortAsc {
+			btn.SetText(label + " ▲")
+		} else {
+			btn.SetText(label + " ▼")
+		}
+	}
+	set(pm.nameHeaderBtn, "Name", sortName)
+	set(pm.ipHeaderBtn, "IP", sortIP)
+	set(pm.successHeader, "Success", sortSuccess)
+	set(pm.failHeaderBtn, "Fail", sortFail)
+	set(pm.totalHeaderBtn, "Total", sortTotal)
+}
+
+// ipLess orders dotted-quad IPs numerically (so 9.0.0.1 sorts before
+// 10.0.0.1); falls back to a plain string compare for unparseable input.
+func ipLess(a, b string) bool {
+	ipA, ipB := net.ParseIP(a), net.ParseIP(b)
+	if ipA != nil && ipB != nil {
+		return bytes.Compare(ipA.To16(), ipB.To16()) < 0
+	}
+	return a < b
 }
 
 func (pm *appState) toggleStartStop() {

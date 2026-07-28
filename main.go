@@ -21,6 +21,7 @@ func main() {
 	})
 
 	a := app.New()
+	a.Settings().SetTheme(newAppTheme())
 	pingPongIcon := fyne.NewStaticResource("ping-pong.png", pingPongPNG)
 	trashIcon := fyne.NewStaticResource("trash.png", trashPNG)
 	a.SetIcon(pingPongIcon)

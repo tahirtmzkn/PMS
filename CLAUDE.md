@@ -36,22 +36,34 @@ sudo apt install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
   (`ping -I <interface> -c 1 -W <timeout_sec> <ip>`). `runCycle` fans a ping out to every device
   concurrently through a size-10 semaphore (`maxConcurrentPings`), calling `onResult` as each
   device finishes and `onDone` once all have.
-- `ui.go` — `appState` holds all app state (devices, settings, running/isPinging flags, the
-  ticker's stop channel) and builds the window content. Rows are hand-built widgets (a
+- `ui.go` — `appState` holds all app state (devices, settings, running/isPinging flags, sort
+  column/direction, the ticker's stop channel) and builds the window content: a single-row
+  toolbar (logo, add-device controls, Start/Clear pinned right via a spacer), the always-visible
+  settings row, then the sortable header and table. Rows are hand-built widgets (a
   `canvas.Rectangle` background + a `container.NewGridWithColumns` grid, stacked), not a
   `widget.Table` — this was a deliberate choice: `widget.Table` recycles cell widgets via
   `CreateCell`/`UpdateCell`, which is a bad fit for a per-row remove button whose callback must
   stay bound to the right row index. `refreshRows` fully rebuilds all rows (and rebinds each
-  remove button's closure to its current index) after structural changes (add/remove/clear/stop);
-  `updateRowResult` is the cheap per-cycle path that only touches one row's counters/color.
-- `settings.go` — an inline settings panel (not a modal dialog): a hidden-by-default row under
-  the top bar, toggled by the Settings button (`appState.toggleSettings`, which calls
-  `topBox.Refresh()` after `Show()`/`Hide()` since Fyne box layouts skip hidden children only
-  once their parent re-lays-out). Validated `widget.Entry` fields for interval/timeout apply on
-  every valid `OnChanged`; interface is a `widget.Select` populated from `net.Interfaces()`
-  (refreshed each time the panel opens) rather than free text. Changing the interval or interface
-  while running calls `startTicker()` again so it takes effect on the next cycle.
-- `main.go` — embeds `assets/*.png` via `//go:embed`, sets app metadata, builds the window.
+  remove button's closure to its current index) after structural changes (add/remove/clear/stop/
+  sort); `updateRowResult` is the cheap per-cycle path that only touches one row's counters/color.
+  Column headers (`newHeaderButton`) are plain `widget.Button`s that call `sortBy`, which toggles
+  ascending/descending on repeat clicks of the same column and re-sorts `pm.devices` in place with
+  `sort.SliceStable` (IP sorts numerically via `ipLess`/`net.ParseIP`, not lexicographically). The
+  Success column's text is `success (%pct)` (`formatSuccess`) once a device has been pinged at
+  least once; sorting on Success still compares the raw count, not the percentage.
+- `settings.go` — an always-visible settings row under the toolbar (no button to show/hide it):
+  validated `widget.Entry` fields for interval/timeout apply on every valid `OnChanged`; interface
+  is a `widget.Select` populated once from `net.Interfaces()` rather than free text. Changing the
+  interval or interface while running calls `startTicker()` again so it takes effect on the next
+  cycle instead of requiring a manual Stop/Start.
+- `theme.go` — `appTheme` wraps `theme.DefaultTheme()` and overrides just `ColorNameSuccess`
+  (a darker green than Fyne's default) and `ColorNameWarning` (a true yellow instead of Fyne's
+  default orange), applied once via `a.Settings().SetTheme(...)` in `main.go`. Because
+  `theme.SuccessColor()`/`ErrorColor()`/`widget.Importance` all resolve through the app's current
+  theme, this one override is what keeps the Start button, Clear button, and the row
+  success/fail tint (`tinted()` in ui.go) all pulling from the same palette.
+- `main.go` — embeds `assets/*.png` via `//go:embed`, sets app metadata and the custom theme,
+  builds the window.
 - `packaging/` — `pms.desktop` + `build-deb.sh`, which hand-rolls a `DEBIAN/control` +
   `usr/bin`/`usr/share/...` tree and calls `dpkg-deb --build` (no extra packaging tool required;
   `fyne package` only produces a `.tar.gz` on Linux, not a `.deb`).
