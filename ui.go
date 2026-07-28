@@ -68,6 +68,10 @@ type appState struct {
 	rows          []*deviceRow
 	rowsContainer *fyne.Container
 
+	// colWidths holds the current width of the Name/IP/Success/Fail/Total
+	// columns, user-adjustable by dragging the header resizers.
+	colWidths []float32
+
 	sortCol sortColumn
 	sortAsc bool
 
@@ -88,6 +92,7 @@ func newAppState(win fyne.Window, trashIcon fyne.Resource) *appState {
 		pingTimeout:   1000,
 		interfaceName: "enp3s0",
 		rowsContainer: container.NewVBox(),
+		colWidths:     []float32{220, 160, 140, 100, 100},
 	}
 }
 
@@ -116,7 +121,7 @@ func (pm *appState) buildUI(pingPongIcon fyne.Resource) fyne.CanvasObject {
 	ipEntry.OnSubmitted = func(string) { addBtn.OnTapped() }
 	nameEntry.OnSubmitted = func(string) { addBtn.OnTapped() }
 
-	const toggleWidth = 100
+	const btnWidth = 100
 
 	pm.toggleBtn = widget.NewButton("Start", pm.toggleStartStop)
 	pm.toggleBtn.Importance = widget.SuccessImportance
@@ -124,17 +129,16 @@ func (pm *appState) buildUI(pingPongIcon fyne.Resource) fyne.CanvasObject {
 	clearBtn := widget.NewButton("Clear", pm.clearStats)
 	clearBtn.Importance = widget.WarningImportance
 
-	// Single-row toolbar: logo, add-device controls on the left, monitor
-	// controls pinned to the right via a spacer — everything on one baseline
-	// instead of two uneven stacked columns.
+	// Single-row toolbar: logo, add-device controls, then Add/Start-Stop/
+	// Clear grouped together at the same width, with the rest of the row
+	// left empty rather than the buttons being split apart by a spacer.
 	topBar := container.NewHBox(
 		icon,
 		fixedWidth(200, ipEntry),
 		fixedWidth(200, nameEntry),
-		addBtn,
-		layout.NewSpacer(),
-		fixedWidth(toggleWidth, pm.toggleBtn),
-		fixedWidth(toggleWidth, clearBtn),
+		fixedWidth(btnWidth, addBtn),
+		fixedWidth(btnWidth, pm.toggleBtn),
+		fixedWidth(btnWidth, clearBtn),
 	)
 
 	settingsRow := pm.buildSettingsPanel()
@@ -145,9 +149,26 @@ func (pm *appState) buildUI(pingPongIcon fyne.Resource) fyne.CanvasObject {
 	pm.failHeaderBtn = pm.newHeaderButton("Fail", sortFail)
 	pm.totalHeaderBtn = pm.newHeaderButton("Total", sortTotal)
 
-	header := container.NewGridWithColumns(6,
-		pm.nameHeaderBtn, pm.ipHeaderBtn, pm.successHeader, pm.failHeaderBtn, pm.totalHeaderBtn,
-		widget.NewLabel(""),
+	var headerRow *fyne.Container
+	newResizer := func(col int) fyne.CanvasObject {
+		return newColResizer(func(dx float32) {
+			pm.colWidths[col] += dx
+			if pm.colWidths[col] < minColumnWidth {
+				pm.colWidths[col] = minColumnWidth
+			}
+			headerRow.Refresh()
+			pm.rowsContainer.Refresh()
+		})
+	}
+
+	headerRow = container.NewHBox(
+		pm.columnCell(0, pm.nameHeaderBtn), newResizer(0),
+		pm.columnCell(1, pm.ipHeaderBtn), newResizer(1),
+		pm.columnCell(2, pm.successHeader), newResizer(2),
+		pm.columnCell(3, pm.failHeaderBtn), newResizer(3),
+		pm.columnCell(4, pm.totalHeaderBtn), newResizer(4),
+		layout.NewSpacer(),
+		fixedWidth(removeColWidth, widget.NewLabel("")),
 	)
 
 	top := container.NewVBox(
@@ -155,7 +176,7 @@ func (pm *appState) buildUI(pingPongIcon fyne.Resource) fyne.CanvasObject {
 		widget.NewSeparator(),
 		container.NewPadded(settingsRow),
 		widget.NewSeparator(),
-		header,
+		headerRow,
 	)
 	scroll := container.NewVScroll(pm.rowsContainer)
 
@@ -221,7 +242,15 @@ func (pm *appState) newRow(idx int, device *Device) *deviceRow {
 	})
 	removeBtn.Importance = widget.LowImportance
 
-	grid := container.NewGridWithColumns(6, nameLbl, ipLbl, successLbl, failLbl, totalLbl, removeBtn)
+	grid := container.NewHBox(
+		pm.columnCell(0, nameLbl), blankGap(resizerWidth),
+		pm.columnCell(1, ipLbl), blankGap(resizerWidth),
+		pm.columnCell(2, successLbl), blankGap(resizerWidth),
+		pm.columnCell(3, failLbl), blankGap(resizerWidth),
+		pm.columnCell(4, totalLbl), blankGap(resizerWidth),
+		layout.NewSpacer(),
+		fixedWidth(removeColWidth, removeBtn),
+	)
 
 	row := &deviceRow{bg: bg, success: successLbl, fail: failLbl, total: totalLbl}
 	row.content = container.NewStack(bg, grid)
