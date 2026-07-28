@@ -65,6 +65,13 @@ sudo apt install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
   is a `widget.Select` populated once from `net.Interfaces()` rather than free text. Changing the
   interval or interface while running calls `startTicker()` again so it takes effect on the next
   cycle instead of requiring a manual Stop/Start.
+- `resizer.go` — small custom widgets/layouts for the table: `themedRect` (a rectangle whose fill
+  is resolved from the live theme *at render time* — `buildUI` runs before the theme variant has
+  settled, so `canvas.NewRectangle(theme.Color(...))` there silently picks dark-variant colors and
+  renders near-black in a light window; this bit both the column dividers and the header band),
+  `colResizer` (drag handle: `resizerWidth` grab area, `dividerThickness` visible line), and
+  `singleColLayout`, which reads its width from a closure over `appState.colWidths` so a drag only
+  needs a `Refresh()` rather than rebuilding widgets.
 - `theme.go` — `appTheme` wraps `theme.DefaultTheme()` and overrides just `ColorNameSuccess`
   (a darker green than Fyne's default) and `ColorNameWarning` (a true yellow instead of Fyne's
   default orange), applied once via `a.Settings().SetTheme(...)` in `main.go`. Because

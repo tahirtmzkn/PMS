@@ -60,3 +60,33 @@ func TestSmokeBuildUI(t *testing.T) {
 	}
 	pm.clearStats()
 }
+
+func TestStatusLine(t *testing.T) {
+	a := test.NewApp()
+	defer a.Quit()
+
+	win := a.NewWindow("PMS")
+	pm := newAppState(win, fyne.NewStaticResource("trash.png", trashPNG))
+	win.SetContent(pm.buildUI(fyne.NewStaticResource("ping-pong.png", pingPongPNG)))
+
+	if got := pm.statusLabel.Text; got != "No devices" {
+		t.Errorf("empty status = %q", got)
+	}
+
+	pm.addDevice("10.0.0.1", "a")
+	if got := pm.statusLabel.Text; got != "Stopped  ·  1 device" {
+		t.Errorf("stopped status = %q", got)
+	}
+
+	pm.addDevice("10.0.0.2", "b")
+	pm.addDevice("10.0.0.3", "c")
+	pm.running = true
+	pm.devices[0].Total, pm.devices[0].LastResult = 3, true
+	pm.devices[1].Total, pm.devices[1].LastResult = 3, false
+	// devices[2] never pinged -> pending, not "down"
+	pm.refreshStatus()
+	want := "Monitoring  ·  3 devices  ·  1 up  ·  1 down  ·  1 pending"
+	if got := pm.statusLabel.Text; got != want {
+		t.Errorf("running status = %q, want %q", got, want)
+	}
+}

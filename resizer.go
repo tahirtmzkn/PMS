@@ -55,6 +55,42 @@ func blankGap(w float32) fyne.CanvasObject {
 	return fixedWidth(w, canvas.NewRectangle(color.Transparent))
 }
 
+// themedRect is a filled rectangle whose color is resolved from the live
+// theme at render time rather than snapshotted at construction. buildUI runs
+// before the theme variant has settled, so a plain
+// canvas.NewRectangle(theme.Color(...)) there picks up dark-variant colors
+// and renders near-black in a light window.
+type themedRect struct {
+	widget.BaseWidget
+	name fyne.ThemeColorName
+	rect *canvas.Rectangle
+}
+
+func newThemedRect(name fyne.ThemeColorName) *themedRect {
+	r := &themedRect{name: name, rect: canvas.NewRectangle(color.Transparent)}
+	r.ExtendBaseWidget(r)
+	return r
+}
+
+func (r *themedRect) CreateRenderer() fyne.WidgetRenderer {
+	r.applyColor()
+	return widget.NewSimpleRenderer(r.rect)
+}
+
+func (r *themedRect) applyColor() {
+	r.rect.FillColor = theme.ColorForWidget(r.name, r)
+}
+
+func (r *themedRect) Refresh() {
+	r.applyColor()
+	r.rect.Refresh()
+	r.BaseWidget.Refresh()
+}
+
+func (r *themedRect) MinSize() fyne.Size {
+	return fyne.NewSize(1, 1)
+}
+
 // centeredLine draws its single child as a thin full-height vertical line in
 // the middle of the available width.
 type centeredLine struct{}
@@ -75,31 +111,18 @@ func (centeredLine) MinSize([]fyne.CanvasObject) fyne.Size {
 // its left when dragged horizontally.
 type colResizer struct {
 	widget.BaseWidget
-	line   *canvas.Rectangle
+	line   *themedRect
 	onDrag func(dx float32)
 }
 
 func newColResizer(onDrag func(dx float32)) *colResizer {
-	r := &colResizer{line: canvas.NewRectangle(color.Transparent), onDrag: onDrag}
+	r := &colResizer{line: newThemedRect(theme.ColorNameSeparator), onDrag: onDrag}
 	r.ExtendBaseWidget(r)
 	return r
 }
 
 func (r *colResizer) CreateRenderer() fyne.WidgetRenderer {
-	r.applyThemeColor()
 	return widget.NewSimpleRenderer(container.New(centeredLine{}, r.line))
-}
-
-// applyThemeColor resolves the separator color against the live theme rather
-// than snapshotting it at construction, when the variant may not be settled.
-func (r *colResizer) applyThemeColor() {
-	r.line.FillColor = theme.ColorForWidget(theme.ColorNameSeparator, r)
-}
-
-func (r *colResizer) Refresh() {
-	r.applyThemeColor()
-	r.line.Refresh()
-	r.BaseWidget.Refresh()
 }
 
 func (r *colResizer) MinSize() fyne.Size {

@@ -79,6 +79,7 @@ type appState struct {
 	sortAsc bool
 
 	toggleBtn      *widget.Button
+	statusLabel    *widget.Label
 	ifaceSelect    *widget.Select
 	nameHeaderBtn  *widget.Button
 	ipHeaderBtn    *widget.Button
@@ -198,8 +199,7 @@ func (pm *appState) buildUI(pingPongIcon fyne.Resource) fyne.CanvasObject {
 
 	// A tinted band behind the header row so the column names read as a
 	// header strip, with the resizer dividers separating them.
-	headerBG := canvas.NewRectangle(theme.Color(theme.ColorNameHeaderBackground))
-	header := container.NewStack(headerBG, headerRow)
+	header := container.NewStack(newThemedRect(theme.ColorNameInputBackground), headerRow)
 
 	top := container.NewVBox(
 		container.NewPadded(topBar),
@@ -208,9 +208,67 @@ func (pm *appState) buildUI(pingPongIcon fyne.Resource) fyne.CanvasObject {
 		widget.NewSeparator(),
 		header,
 	)
+
+	pm.statusLabel = widget.NewLabel("")
+	pm.refreshStatus()
+	statusBar := container.NewVBox(
+		widget.NewSeparator(),
+		container.NewPadded(pm.statusLabel),
+	)
+
 	scroll := container.NewVScroll(pm.rowsContainer)
 
-	return container.NewBorder(top, nil, nil, nil, scroll)
+	return container.NewBorder(top, statusBar, nil, nil, scroll)
+}
+
+// refreshStatus rewrites the bottom status line. "pending" covers devices
+// added (or just cleared) that this cycle hasn't reached yet, so they aren't
+// misreported as down before their first ping.
+func (pm *appState) refreshStatus() {
+	if pm.statusLabel == nil {
+		return
+	}
+
+	n := len(pm.devices)
+	if n == 0 {
+		pm.statusLabel.SetText("No devices")
+		return
+	}
+
+	// While stopped the table shows no up/down coloring either, so the
+	// device count is all that's meaningful.
+	if !pm.running {
+		pm.statusLabel.SetText("Stopped  ·  " + plural(n, "device"))
+		return
+	}
+
+	up, down, pending := 0, 0, 0
+	for _, d := range pm.devices {
+		switch {
+		case d.Total == 0:
+			pending++
+		case d.LastResult:
+			up++
+		default:
+			down++
+		}
+	}
+
+	parts := []string{"Monitoring", plural(n, "device")}
+	if up > 0 || down > 0 {
+		parts = append(parts, fmt.Sprintf("%d up", up), fmt.Sprintf("%d down", down))
+	}
+	if pending > 0 {
+		parts = append(parts, fmt.Sprintf("%d pending", pending))
+	}
+	pm.statusLabel.SetText(strings.Join(parts, "  ·  "))
+}
+
+func plural(n int, word string) string {
+	if n == 1 {
+		return "1 " + word
+	}
+	return fmt.Sprintf("%d %ss", n, word)
 }
 
 func (pm *appState) addDevice(ip, name string) {
@@ -255,6 +313,7 @@ func (pm *appState) refreshRows() {
 	}
 	pm.rowsContainer.Objects = objects
 	pm.rowsContainer.Refresh()
+	pm.refreshStatus()
 }
 
 func (pm *appState) newRow(idx int, device *Device) *deviceRow {
@@ -412,6 +471,7 @@ func (pm *appState) start() {
 	pm.toggleBtn.SetText("Stop")
 	pm.toggleBtn.Importance = widget.DangerImportance
 	pm.toggleBtn.Refresh()
+	pm.refreshStatus()
 	pm.startTicker()
 }
 
@@ -475,7 +535,10 @@ func (pm *appState) tick() {
 			fyne.Do(func() { pm.updateRowResult(idx, d) })
 		},
 		func() {
-			fyne.Do(func() { pm.isPinging = false })
+			fyne.Do(func() {
+				pm.isPinging = false
+				pm.refreshStatus()
+			})
 		},
 	)
 }
