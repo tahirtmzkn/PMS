@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=PMS
+Comment=Ping Monitoring System
+Exec=/usr/bin/pms
+Icon=pms
+Categories=Network;Monitor;
+Terminal=false
