@@ -12,9 +12,13 @@ import (
 )
 
 const (
-	resizerWidth   float32 = 6
-	minColumnWidth float32 = 50
-	removeColWidth float32 = 40
+	// resizerWidth is the grab area; dividerThickness is the visible line
+	// drawn centered inside it, so the handle stays easy to hit without
+	// looking like a thick bar.
+	resizerWidth     float32 = 7
+	dividerThickness float32 = 1
+	minColumnWidth   float32 = 50
+	removeColWidth   float32 = 40
 )
 
 // singleColLayout sizes its one child to a width read live from a closure,
@@ -51,6 +55,22 @@ func blankGap(w float32) fyne.CanvasObject {
 	return fixedWidth(w, canvas.NewRectangle(color.Transparent))
 }
 
+// centeredLine draws its single child as a thin full-height vertical line in
+// the middle of the available width.
+type centeredLine struct{}
+
+func (centeredLine) Layout(objs []fyne.CanvasObject, size fyne.Size) {
+	if len(objs) == 0 {
+		return
+	}
+	objs[0].Move(fyne.NewPos((size.Width-dividerThickness)/2, 0))
+	objs[0].Resize(fyne.NewSize(dividerThickness, size.Height))
+}
+
+func (centeredLine) MinSize([]fyne.CanvasObject) fyne.Size {
+	return fyne.NewSize(resizerWidth, 1)
+}
+
 // colResizer is a thin draggable divider that widens/narrows the column to
 // its left when dragged horizontally.
 type colResizer struct {
@@ -60,13 +80,26 @@ type colResizer struct {
 }
 
 func newColResizer(onDrag func(dx float32)) *colResizer {
-	r := &colResizer{line: canvas.NewRectangle(theme.Color(theme.ColorNameSeparator)), onDrag: onDrag}
+	r := &colResizer{line: canvas.NewRectangle(color.Transparent), onDrag: onDrag}
 	r.ExtendBaseWidget(r)
 	return r
 }
 
 func (r *colResizer) CreateRenderer() fyne.WidgetRenderer {
-	return widget.NewSimpleRenderer(r.line)
+	r.applyThemeColor()
+	return widget.NewSimpleRenderer(container.New(centeredLine{}, r.line))
+}
+
+// applyThemeColor resolves the separator color against the live theme rather
+// than snapshotting it at construction, when the variant may not be settled.
+func (r *colResizer) applyThemeColor() {
+	r.line.FillColor = theme.ColorForWidget(theme.ColorNameSeparator, r)
+}
+
+func (r *colResizer) Refresh() {
+	r.applyThemeColor()
+	r.line.Refresh()
+	r.BaseWidget.Refresh()
 }
 
 func (r *colResizer) MinSize() fyne.Size {

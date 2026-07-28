@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"net"
 	"sort"
 	"strconv"
@@ -11,24 +10,6 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
 )
-
-// intRangeValidator returns a validator requiring a whole number in [min, max].
-// A max of 0 means "no upper bound".
-func intRangeValidator(min, max int) fyne.StringValidator {
-	return func(s string) error {
-		n, err := strconv.Atoi(strings.TrimSpace(s))
-		if err != nil {
-			return fmt.Errorf("must be a whole number")
-		}
-		if n < min || (max > 0 && n > max) {
-			if max > 0 {
-				return fmt.Errorf("must be between %d and %d", min, max)
-			}
-			return fmt.Errorf("must be at least %d", min)
-		}
-		return nil
-	}
-}
 
 // listInterfaces returns the machine's network interface names, sorted.
 func listInterfaces() []string {
@@ -45,13 +26,16 @@ func listInterfaces() []string {
 }
 
 // buildSettingsPanel builds the always-visible settings row shown under the
-// top bar. Each field applies immediately once valid; changing the interval
-// or interface while running restarts the ticker so it takes effect on the
-// next cycle instead of waiting for a manual Stop/Start.
+// top bar. Each field applies immediately once it parses to a sane value;
+// changing the interval or interface while running restarts the ticker so it
+// takes effect on the next cycle instead of waiting for a manual Stop/Start.
+//
+// The entries deliberately have no Validator: Fyne renders a validation
+// status icon inside any entry that has one, and out-of-range input is
+// already handled by simply not applying it.
 func (pm *appState) buildSettingsPanel() *fyne.Container {
 	intervalEntry := widget.NewEntry()
 	intervalEntry.SetText(strconv.Itoa(pm.pingInterval))
-	intervalEntry.Validator = intRangeValidator(1, 0)
 	intervalEntry.OnChanged = func(s string) {
 		n, err := strconv.Atoi(strings.TrimSpace(s))
 		if err != nil || n < 1 {
@@ -65,7 +49,6 @@ func (pm *appState) buildSettingsPanel() *fyne.Container {
 
 	timeoutEntry := widget.NewEntry()
 	timeoutEntry.SetText(strconv.Itoa(pm.pingTimeout))
-	timeoutEntry.Validator = intRangeValidator(100, 10000)
 	timeoutEntry.OnChanged = func(s string) {
 		n, err := strconv.Atoi(strings.TrimSpace(s))
 		if err != nil || n < 100 || n > 10000 {
@@ -85,9 +68,10 @@ func (pm *appState) buildSettingsPanel() *fyne.Container {
 	})
 	pm.ifaceSelect.SetSelected(pm.interfaceName)
 
+	h := pm.controlHeight
 	return container.NewHBox(
-		widget.NewLabel("Interval (s)"), fixedWidth(70, intervalEntry),
-		widget.NewLabel("Timeout (ms)"), fixedWidth(90, timeoutEntry),
-		widget.NewLabel("Interface"), fixedWidth(160, pm.ifaceSelect),
+		widget.NewLabel("Interval (s)"), sized(70, h, intervalEntry),
+		widget.NewLabel("Timeout (ms)"), sized(90, h, timeoutEntry),
+		widget.NewLabel("Interface"), sized(160, h, pm.ifaceSelect),
 	)
 }

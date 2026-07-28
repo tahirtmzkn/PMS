@@ -17,11 +17,20 @@ of a Python venv.
 go build -o build/pms .        # build
 ./build/pms                    # run
 go vet ./...                   # static check
+go test ./...                  # headless smoke test
 ./packaging/build-deb.sh 0.1.0 # build dist/pms_0.1.0_amd64.deb
 ```
 
-There is no test suite. Verify UI changes by running the app and exercising add/remove device,
-Start/Stop, Settings, and Clear.
+**Do not drive the running app with synthetic clicks/keystrokes to test it.** This repo lives on
+a desktop that also has live root SSH sessions to network gear on screen; misdirected synthetic
+input is dangerous, and the user has said explicitly that they do the interactive testing
+themselves. Verify with `go build`, `go vet`, and `go test`, then describe what changed and hand
+off.
+
+`smoke_test.go` is the only test: it builds the whole UI against `test.NewApp()` (headless, no
+window opens) and exercises add/remove/sort/resize-drag/formatting. It exists so UI changes —
+especially custom widgets like `colResizer` — can be checked for panics and logic regressions
+without opening a window on the user's screen. Extend it rather than launching the app.
 
 Building requires cgo + OpenGL/X11 dev headers (one-time, Ubuntu 24.04):
 ```

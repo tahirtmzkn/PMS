@@ -72,6 +72,9 @@ type appState struct {
 	// columns, user-adjustable by dragging the header resizers.
 	colWidths []float32
 
+	// controlHeight is the shared height of every entry/button/select.
+	controlHeight float32
+
 	sortCol sortColumn
 	sortAsc bool
 
@@ -96,19 +99,36 @@ func newAppState(win fyne.Window, trashIcon fyne.Resource) *appState {
 	}
 }
 
-// fixedWidth pins obj to width w (height stays its natural minimum), since
-// Box layouts otherwise size children to their own tight MinSize.
+// sized pins obj to an exact width and height. Box layouts otherwise size
+// children to their own tight MinSize, which is why entries (taller) and
+// buttons (shorter) render at different heights unless given a common one.
+func sized(w, h float32, obj fyne.CanvasObject) fyne.CanvasObject {
+	return container.NewGridWrap(fyne.NewSize(w, h), obj)
+}
+
+// fixedWidth pins obj to width w, keeping its natural minimum height.
 func fixedWidth(w float32, obj fyne.CanvasObject) fyne.CanvasObject {
-	return container.NewGridWrap(fyne.NewSize(w, obj.MinSize().Height), obj)
+	return sized(w, obj.MinSize().Height, obj)
+}
+
+// maxMinHeight is the tallest MinSize height among objs — used to pick one
+// control height that fits every widget type in a toolbar row.
+func maxMinHeight(objs ...fyne.CanvasObject) float32 {
+	h := float32(0)
+	for _, o := range objs {
+		if mh := o.MinSize().Height; mh > h {
+			h = mh
+		}
+	}
+	return h
 }
 
 func (pm *appState) buildUI(pingPongIcon fyne.Resource) fyne.CanvasObject {
 	icon := canvas.NewImageFromResource(pingPongIcon)
 	icon.FillMode = canvas.ImageFillContain
-	icon.SetMinSize(fyne.NewSize(40, 40))
 
 	ipEntry := widget.NewEntry()
-	ipEntry.SetPlaceHolder("IP address")
+	ipEntry.SetPlaceHolder("IP Address")
 	nameEntry := widget.NewEntry()
 	nameEntry.SetPlaceHolder("Device Name (optional)")
 
@@ -129,16 +149,21 @@ func (pm *appState) buildUI(pingPongIcon fyne.Resource) fyne.CanvasObject {
 	clearBtn := widget.NewButton("Clear", pm.clearStats)
 	clearBtn.Importance = widget.WarningImportance
 
+	// One control height for every entry/button/select in the app, taken from
+	// the tallest of the three widget types so none of them get clipped.
+	pm.controlHeight = maxMinHeight(ipEntry, addBtn, widget.NewSelect([]string{"wlp0s20f3"}, nil))
+	icon.SetMinSize(fyne.NewSize(pm.controlHeight, pm.controlHeight))
+
 	// Single-row toolbar: logo, add-device controls, then Add/Start-Stop/
 	// Clear grouped together at the same width, with the rest of the row
 	// left empty rather than the buttons being split apart by a spacer.
 	topBar := container.NewHBox(
 		icon,
-		fixedWidth(200, ipEntry),
-		fixedWidth(200, nameEntry),
-		fixedWidth(btnWidth, addBtn),
-		fixedWidth(btnWidth, pm.toggleBtn),
-		fixedWidth(btnWidth, clearBtn),
+		sized(200, pm.controlHeight, ipEntry),
+		sized(200, pm.controlHeight, nameEntry),
+		sized(btnWidth, pm.controlHeight, addBtn),
+		sized(btnWidth, pm.controlHeight, pm.toggleBtn),
+		sized(btnWidth, pm.controlHeight, clearBtn),
 	)
 
 	settingsRow := pm.buildSettingsPanel()
@@ -171,12 +196,17 @@ func (pm *appState) buildUI(pingPongIcon fyne.Resource) fyne.CanvasObject {
 		fixedWidth(removeColWidth, widget.NewLabel("")),
 	)
 
+	// A tinted band behind the header row so the column names read as a
+	// header strip, with the resizer dividers separating them.
+	headerBG := canvas.NewRectangle(theme.Color(theme.ColorNameHeaderBackground))
+	header := container.NewStack(headerBG, headerRow)
+
 	top := container.NewVBox(
 		container.NewPadded(topBar),
 		widget.NewSeparator(),
 		container.NewPadded(settingsRow),
 		widget.NewSeparator(),
-		headerRow,
+		header,
 	)
 	scroll := container.NewVScroll(pm.rowsContainer)
 
