@@ -59,12 +59,30 @@ sudo apt install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
   `refreshRows` fully rebuilds all rows after structural changes (add/remove/clear/stop/sort);
   `updateRowResult` is the cheap per-cycle path that only touches one row's counters/color.
   Each row ends with a reorder grip (`dragHandle`, see `resizer.go`) and the remove button.
-  Dragging the grip runs `dragRow`, which accumulates vertical travel in `dragOffset` until it
-  covers one `rowStride()` (row height + `theme.Padding()`), then calls `swapRows`. `swapRows`
+  Dragging the grip runs `dragRow`, which accumulates vertical travel in `dragOffset`: the row is
+  drawn at that offset so it follows the pointer, and once the travel covers one `rowStride()`
+  (row height + `theme.Padding()`) `swapRows` exchanges it with its neighbour while the offset
+  drops by the same stride — so the row's screen position is continuous across a swap. `swapRows`
   deliberately does *not* call `refreshRows` — a rebuild mid-drag would destroy the very grip
-  widget the driver is delivering `Dragged` events to — it swaps the existing rows in
-  `devices`/`rows`/`rowsContainer.Objects` together and clears `sortCol` (a hand-ordered list
-  makes any header arrow a lie).
+  widget the driver is delivering `Dragged` events to — it swaps `devices`/`rows` together and
+  clears `sortCol` (a hand-ordered list makes any header arrow a lie).
+  Drag animation is three cooperating pieces:
+    - `rowOffsets` (keyed by row content object, read by `rowsLayout`) is how far each row is drawn
+      from its slot; `rowAnims` holds the in-flight animations so a new drag can cut one short.
+      `refreshRows` stops and clears both, since the rows they move are being discarded.
+    - `animateRowOffset` eases an offset back to 0 over `canvas.DurationShort` with
+      `AnimationEaseOut` — used for the row displaced by a swap (started at ±one stride so it
+      slides into the vacated slot) and for the dragged row settling on release. Animation `Tick`
+      callbacks run on the main draw loop (`TickAnimations` is called from the driver's paint
+      loop), so they must **not** be wrapped in `fyne.Do` — that logs a "called from main
+      goroutine" error. Ticks call `layoutRows` (re-layout + `canvas.Refresh`) rather than
+      `Container.Refresh`, which would deep-refresh every label each frame.
+      `rowSlideAnimation` returns the unstarted animation so tests can step it frame by frame —
+      Fyne's *test* driver finishes any animation it is handed instantly on `Start`.
+    - a dragged row is `lifted`: `syncPaintOrder` moves it to the end of `rowsContainer.Objects`
+      so it paints above the rows it passes, and `colorRow` composites its tint onto the window
+      background (`opaqueOver`) plus a hairline outline. Both are needed — a translucent row would
+      let the row underneath show through it. It stays lifted until the settle animation lands.
   Column headers (`newHeaderButton`) are plain `widget.Button`s that call `sortBy`, which toggles
   ascending/descending on repeat clicks of the same column and re-sorts `pm.devices` in place with
   `sort.SliceStable` (IP sorts numerically via `ipLess`/`net.ParseIP`, not lexicographically).
@@ -86,9 +104,13 @@ sudo apt install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
   `dragHandle` (the row-reorder grip; it *extends `widget.Button`* with `Dragged`/`DragEnd` rather
   than being hand-rolled, which is what makes its footprint and glyph size identical to the remove
   button beside it — both draw at `theme.SizeNameInlineIcon` — and it deliberately has no
-  `OnTapped`, so a click that never crosses the drag threshold does nothing), and
-  `singleColLayout`, which reads its width from a closure over `appState.colWidths` so a drag only
-  needs a `Refresh()` rather than rebuilding widgets.
+  `OnTapped`, so a click that never crosses the drag threshold does nothing), `singleColLayout`,
+  which reads its width from a closure over `appState.colWidths` so a drag only needs a
+  `Refresh()` rather than rebuilding widgets, and `rowsLayout`, the VBox replacement the rows sit
+  in: it takes slot order from a closure over `appState.rows` instead of from the container's
+  `Objects` order (which frees `Objects` to carry paint order, so the dragged row can be painted
+  last) and adds each row's `rowOffsets` entry to its Y. Its `MinSize` ignores those offsets, so a
+  row leaning out of its slot never resizes the scroll content.
 - `theme.go` — `appTheme` wraps `theme.DefaultTheme()` and overrides just `ColorNameSuccess`
   (a darker green than Fyne's default) and `ColorNameWarning` (a true yellow instead of Fyne's
   default orange), applied once via `a.Settings().SetTheme(...)` in `main.go`. Because

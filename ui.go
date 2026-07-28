@@ -35,7 +35,10 @@ type deviceRow struct {
 	// device is what ties a row to its data. Rows are looked up by this
 	// pointer rather than by list index, so reordering the list (drag) or
 	// removing a device can't leave a row updating someone else's counters.
-	device  *Device
+	device *Device
+	// lifted marks the row as picked up by its grip: drawn above its
+	// neighbours with an opaque background so it hides what it passes over.
+	lifted  bool
 	bg      *canvas.Rectangle
 	success *widget.Label
 	fail    *widget.Label
@@ -89,6 +92,13 @@ type appState struct {
 	dragDevice *Device
 	dragOffset float32
 
+	// rowOffsets is the extra Y each row is currently drawn at, keyed by row
+	// content object because that is what rowsLayout sees. Non-zero only while
+	// a row is being dragged or is animating back into its slot; rowAnims
+	// holds those animations so a new drag can cut one short.
+	rowOffsets map[fyne.CanvasObject]float32
+	rowAnims   map[fyne.CanvasObject]*fyne.Animation
+
 	toggleBtn      *widget.Button
 	statusLabel    *widget.Label
 	ifaceSelect    *widget.Select
@@ -101,15 +111,31 @@ type appState struct {
 }
 
 func newAppState(win fyne.Window, trashIcon fyne.Resource) *appState {
-	return &appState{
+	pm := &appState{
 		win:           win,
 		trashIcon:     trashIcon,
 		pingInterval:  1,
 		pingTimeout:   1000,
 		interfaceName: "enp3s0",
-		rowsContainer: container.NewVBox(),
 		colWidths:     []float32{220, 160, 125, 125, 125, 125},
+		rowOffsets:    map[fyne.CanvasObject]float32{},
+		rowAnims:      map[fyne.CanvasObject]*fyne.Animation{},
 	}
+	pm.rowsContainer = container.New(rowsLayout{
+		slots:  pm.slotObjects,
+		offset: func(o fyne.CanvasObject) float32 { return pm.rowOffsets[o] },
+	})
+	return pm
+}
+
+// slotObjects lists the row contents in list order — the order they occupy
+// slots in, as opposed to the order they are painted in (see syncPaintOrder).
+func (pm *appState) slotObjects() []fyne.CanvasObject {
+	objs := make([]fyne.CanvasObject, len(pm.rows))
+	for i, row := range pm.rows {
+		objs[i] = row.content
+	}
+	return objs
 }
 
 // sized pins obj to an exact width and height. Box layouts otherwise size
@@ -321,16 +347,52 @@ func (pm *appState) clearStats() {
 // (add/remove/clear/stop/sort) — mirrors the Python version's full table
 // refresh. Not usable mid-drag: see swapRows.
 func (pm *appState) refreshRows() {
-	pm.rows = make([]*deviceRow, len(pm.devices))
-	objects := make([]fyne.CanvasObject, len(pm.devices))
-	for idx, device := range pm.devices {
-		row := pm.newRow(device)
-		pm.rows[idx] = row
-		objects[idx] = row.content
+	// The rows these animations are moving are about to be thrown away, and
+	// their map entries with them.
+	for _, anim := range pm.rowAnims {
+		anim.Stop()
 	}
-	pm.rowsContainer.Objects = objects
-	pm.rowsContainer.Refresh()
+	clear(pm.rowAnims)
+	clear(pm.rowOffsets)
+
+	pm.rows = make([]*deviceRow, len(pm.devices))
+	for idx, device := range pm.devices {
+		pm.rows[idx] = pm.newRow(device)
+	}
+	pm.syncPaintOrder()
 	pm.refreshStatus()
+}
+
+// syncPaintOrder rebuilds the container's Objects from the current row order.
+// Paint order is slot order, except that a lifted row goes last so it draws
+// above the rows it is passing over — rowsLayout takes slot order from
+// pm.rows, not from Objects, so this doesn't move any row's slot.
+func (pm *appState) syncPaintOrder() {
+	objs := make([]fyne.CanvasObject, 0, len(pm.rows))
+	var lifted fyne.CanvasObject
+	for _, row := range pm.rows {
+		if row.lifted {
+			lifted = row.content
+			continue
+		}
+		objs = append(objs, row.content)
+	}
+	if lifted != nil {
+		objs = append(objs, lifted)
+	}
+	pm.rowsContainer.Objects = objs
+	pm.rowsContainer.Refresh()
+}
+
+// layoutRows re-positions the rows without Container.Refresh's deep refresh of
+// every child widget: an animation frame only moves rows, it doesn't change any
+// text or color.
+func (pm *appState) layoutRows() {
+	if pm.rowsContainer.Layout == nil {
+		return
+	}
+	pm.rowsContainer.Layout.Layout(pm.rowsContainer.Objects, pm.rowsContainer.Size())
+	canvas.Refresh(pm.rowsContainer)
 }
 
 func (pm *appState) newRow(device *Device) *deviceRow {
@@ -381,8 +443,34 @@ func (pm *appState) colorRow(row *deviceRow, device *Device) {
 			col = tinted(theme.ErrorColor(), 90)
 		}
 	}
+
+	// A lifted row is drawn over the rows it passes, so its tint is composited
+	// onto the window background rather than left translucent — otherwise the
+	// row underneath shows straight through it — and a hairline outline gives
+	// it an edge even against a neighbour of the same status color.
+	if row.lifted {
+		col = opaqueOver(col, theme.Color(theme.ColorNameBackground))
+		row.bg.StrokeColor = theme.Color(theme.ColorNameSeparator)
+		row.bg.StrokeWidth = 1
+	} else {
+		row.bg.StrokeWidth = 0
+	}
+
 	row.bg.FillColor = col
 	row.bg.Refresh()
+}
+
+// opaqueOver composites the (possibly translucent) fg over an opaque bg and
+// returns the result at full alpha. Color.RGBA values are alpha-premultiplied,
+// which is why fg needs no extra scaling here.
+func opaqueOver(fg, bg color.Color) color.NRGBA {
+	fr, fgr, fb, fa := fg.RGBA()
+	br, bgr, bb, _ := bg.RGBA()
+	inv := 1 - float64(fa)/0xffff
+	mix := func(f, b uint32) uint8 {
+		return uint8((float64(f) + float64(b)*inv) / 0x101)
+	}
+	return color.NRGBA{R: mix(fr, br), G: mix(fgr, bgr), B: mix(fb, bb), A: 0xff}
 }
 
 // indexOf returns device's current position in pm.devices, or -1 if it's gone.
@@ -408,16 +496,23 @@ func (pm *appState) rowFor(device *Device) *deviceRow {
 	return nil
 }
 
-// dragRow reorders the device list while a row's grip is dragged. Vertical
-// travel accumulates until it covers a whole row, then the device swaps with
-// its neighbour, which keeps the dragged row under the pointer without needing
-// a floating drag preview. Travel is zeroed at either end of the list so
-// overshooting past the last row doesn't have to be unwound before the row
+// dragRow reorders the device list while a row's grip is dragged. The row is
+// drawn at its accumulated travel so it follows the pointer, and once that
+// travel covers a whole row the device swaps with its neighbour — at which
+// point the travel drops by the same stride, so the row's position on screen
+// stays continuous across the swap. Travel is zeroed at either end of the list
+// so overshooting past the last row doesn't have to be unwound before the row
 // responds to being dragged back.
 func (pm *appState) dragRow(device *Device, dy float32) {
+	row := pm.rowFor(device)
+	if row == nil {
+		return
+	}
 	if pm.dragDevice != device {
+		pm.endRowDrag()
 		pm.dragDevice = device
 		pm.dragOffset = 0
+		pm.liftRow(row)
 	}
 
 	stride := pm.rowStride()
@@ -429,22 +524,99 @@ func (pm *appState) dragRow(device *Device, dy float32) {
 	for pm.dragOffset >= stride {
 		if !pm.swapRows(pm.indexOf(device), 1) {
 			pm.dragOffset = 0
-			return
+			break
 		}
 		pm.dragOffset -= stride
 	}
 	for pm.dragOffset <= -stride {
 		if !pm.swapRows(pm.indexOf(device), -1) {
 			pm.dragOffset = 0
-			return
+			break
 		}
 		pm.dragOffset += stride
 	}
+
+	pm.rowOffsets[row.content] = pm.dragOffset
+	pm.layoutRows()
 }
 
+// endRowDrag releases the grip: the row eases from wherever the pointer left
+// it into its slot, and stays lifted until it lands so it doesn't spend the
+// animation half-overlapping a neighbour.
 func (pm *appState) endRowDrag() {
+	device, offset := pm.dragDevice, pm.dragOffset
 	pm.dragDevice = nil
 	pm.dragOffset = 0
+	if device == nil {
+		return
+	}
+	if row := pm.rowFor(device); row != nil {
+		pm.animateRowOffset(row, offset)
+	}
+}
+
+// liftRow picks a row up: opaque background, thin outline, painted last.
+func (pm *appState) liftRow(row *deviceRow) {
+	pm.stopRowAnim(row)
+	row.lifted = true
+	pm.colorRow(row, row.device)
+	pm.syncPaintOrder()
+}
+
+// animateRowOffset eases a row from a visual offset back into its slot — the
+// row displaced by a swap sliding into the vacated slot, or the dragged row
+// settling once released. The offset is applied up front so the first frame
+// doesn't flash the row at its destination.
+func (pm *appState) animateRowOffset(row *deviceRow, from float32) {
+	pm.stopRowAnim(row)
+	if from == 0 || !fyne.CurrentApp().Settings().ShowAnimations() {
+		pm.settleRow(row)
+		return
+	}
+
+	obj := row.content
+	pm.rowOffsets[obj] = from
+	anim := pm.rowSlideAnimation(row, from)
+	pm.rowAnims[obj] = anim
+	anim.Start()
+}
+
+// rowSlideAnimation builds, but does not start, the animation that walks a
+// row's offset back down to zero. Split out from animateRowOffset so the
+// interpolation can be driven a frame at a time in tests — Fyne's test driver
+// completes any animation it is handed instantly.
+func (pm *appState) rowSlideAnimation(row *deviceRow, from float32) *fyne.Animation {
+	obj := row.content
+	anim := fyne.NewAnimation(canvas.DurationShort, func(p float32) {
+		if p >= 1 {
+			delete(pm.rowAnims, obj)
+			pm.settleRow(row)
+			return
+		}
+		pm.rowOffsets[obj] = from * (1 - p)
+		pm.layoutRows()
+	})
+	anim.Curve = fyne.AnimationEaseOut
+	return anim
+}
+
+// settleRow drops a row back into its slot: no offset, no lift.
+func (pm *appState) settleRow(row *deviceRow) {
+	delete(pm.rowOffsets, row.content)
+	if row.lifted {
+		row.lifted = false
+		pm.colorRow(row, row.device)
+		pm.syncPaintOrder()
+		return
+	}
+	pm.layoutRows()
+}
+
+func (pm *appState) stopRowAnim(row *deviceRow) {
+	if anim := pm.rowAnims[row.content]; anim != nil {
+		anim.Stop()
+		delete(pm.rowAnims, row.content)
+	}
 }
 
 // rowStride is the on-screen distance from one row to the next: the row's own
@@ -463,20 +635,23 @@ func (pm *appState) rowStride() float32 {
 
 // swapRows moves the device at idx one place in direction delta, swapping the
 // existing row widgets instead of calling refreshRows: a rebuild mid-drag
-// would detach the very grip the driver is delivering drag events to. A manual
-// reorder also invalidates whatever order a header arrow is claiming, so the
-// sort indicator is dropped.
+// would detach the very grip the driver is delivering drag events to. The
+// displaced row's slot jumps a whole stride, so it starts where it was and
+// slides into the vacated one. A manual reorder also invalidates whatever
+// order a header arrow is claiming, so the sort indicator is dropped.
 func (pm *appState) swapRows(idx, delta int) bool {
 	to := idx + delta
 	if idx < 0 || idx >= len(pm.devices) || to < 0 || to >= len(pm.devices) {
 		return false
 	}
 
+	displaced := pm.rows[to]
+	stride := pm.rowStride()
+
 	pm.devices[idx], pm.devices[to] = pm.devices[to], pm.devices[idx]
 	pm.rows[idx], pm.rows[to] = pm.rows[to], pm.rows[idx]
-	objs := pm.rowsContainer.Objects
-	objs[idx], objs[to] = objs[to], objs[idx]
-	pm.rowsContainer.Refresh()
+	pm.syncPaintOrder()
+	pm.animateRowOffset(displaced, float32(delta)*stride)
 
 	if pm.sortCol != sortNone {
 		pm.sortCol = sortNone

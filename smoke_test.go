@@ -108,6 +108,22 @@ func TestRowReorder(t *testing.T) {
 	if pm.devices[0] != first {
 		t.Errorf("half a row of travel moved the device")
 	}
+
+	// ...but the row itself follows the pointer, lifted above its neighbours
+	row := pm.rowFor(first)
+	if !row.lifted {
+		t.Errorf("dragged row was not lifted")
+	}
+	if got := pm.rowOffsets[row.content]; got != stride/2 {
+		t.Errorf("row offset = %v, want %v", got, stride/2)
+	}
+	if objs := pm.rowsContainer.Objects; objs[len(objs)-1] != row.content {
+		t.Errorf("lifted row is not painted last")
+	}
+	if _, _, _, alpha := row.bg.FillColor.RGBA(); alpha != 0xffff {
+		t.Errorf("lifted row background is translucent, alpha = %d", alpha)
+	}
+
 	pm.dragRow(first, stride/2)
 	if pm.devices[1] != first {
 		t.Errorf("a full row of travel did not move the device down")
@@ -126,7 +142,30 @@ func TestRowReorder(t *testing.T) {
 	if pm.devices[len(pm.devices)-1] != first {
 		t.Errorf("device did not reach the bottom row")
 	}
+
+	// releasing part-way through a row settles it: no lift, no offset
+	pm.dragRow(first, -stride/3)
 	pm.endRowDrag()
+	if row.lifted {
+		t.Errorf("row still lifted after settling")
+	}
+	if _, ok := pm.rowOffsets[row.content]; ok {
+		t.Errorf("settled row left an offset behind")
+	}
+
+	// the settle above is instant here (the test driver finishes animations on
+	// Start), so drive the interpolation by hand to check it eases rather than
+	// jumps, and cleans up its offset at the end
+	pm.rowOffsets[row.content] = stride
+	anim := pm.rowSlideAnimation(row, stride)
+	anim.Tick(0.5)
+	if off := pm.rowOffsets[row.content]; off <= 0 || off >= stride {
+		t.Errorf("mid-slide offset = %v, want between 0 and %v", off, stride)
+	}
+	anim.Tick(1)
+	if _, ok := pm.rowOffsets[row.content]; ok {
+		t.Errorf("finished slide left an offset behind")
+	}
 
 	// counters must follow the device to wherever its row now is
 	first.Success, first.Total = 2, 2

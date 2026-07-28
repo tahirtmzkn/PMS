@@ -44,6 +44,42 @@ func (l singleColLayout) MinSize(objs []fyne.CanvasObject) fyne.Size {
 	return fyne.NewSize(l.width(), h)
 }
 
+// rowsLayout stacks the table's rows top to bottom the way a VBox would, plus
+// the two things a drag needs. Slot order comes from a closure rather than from
+// the container's Objects order, so the row being dragged can be moved to the
+// end of Objects — painting above the rows it passes over — without that
+// changing where it sits. And every row is drawn at its slot plus a per-row
+// offset: how far the drag, or the animation settling it back, has carried it.
+type rowsLayout struct {
+	slots  func() []fyne.CanvasObject
+	offset func(fyne.CanvasObject) float32
+}
+
+func (l rowsLayout) Layout(_ []fyne.CanvasObject, size fyne.Size) {
+	y, pad := float32(0), theme.Padding()
+	for _, o := range l.slots() {
+		h := o.MinSize().Height
+		o.Move(fyne.NewPos(0, y+l.offset(o)))
+		o.Resize(fyne.NewSize(size.Width, h))
+		y += h + pad
+	}
+}
+
+// MinSize deliberately ignores the offsets: a row leaning out of its slot
+// mid-drag must not resize the scroll content under it.
+func (l rowsLayout) MinSize(_ []fyne.CanvasObject) fyne.Size {
+	min, pad := fyne.NewSize(0, 0), theme.Padding()
+	for i, o := range l.slots() {
+		m := o.MinSize()
+		min.Width = fyne.Max(min.Width, m.Width)
+		if i > 0 {
+			min.Height += pad
+		}
+		min.Height += m.Height
+	}
+	return min
+}
+
 // columnCell wraps obj so it always renders at the current width of column i.
 func (pm *appState) columnCell(i int, obj fyne.CanvasObject) fyne.CanvasObject {
 	return container.New(singleColLayout{width: func() float32 { return pm.colWidths[i] }}, obj)
