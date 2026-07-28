@@ -99,7 +99,7 @@ func newAppState(win fyne.Window, trashIcon fyne.Resource) *appState {
 		pingTimeout:   1000,
 		interfaceName: "enp3s0",
 		rowsContainer: container.NewVBox(),
-		colWidths:     []float32{220, 160, 100, 100, 100, 100},
+		colWidths:     []float32{220, 160, 125, 125, 125, 125},
 	}
 }
 
