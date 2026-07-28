@@ -448,15 +448,22 @@ func (pm *appState) colorRow(row *deviceRow, device *Device) {
 	// onto the window background rather than left translucent — otherwise the
 	// row underneath shows straight through it — and a hairline outline gives
 	// it an edge even against a neighbour of the same status color.
+	stroke := float32(0)
+	strokeCol := color.Color(color.Transparent)
 	if row.lifted {
 		col = opaqueOver(col, theme.Color(theme.ColorNameBackground))
-		row.bg.StrokeColor = theme.Color(theme.ColorNameSeparator)
-		row.bg.StrokeWidth = 1
-	} else {
-		row.bg.StrokeWidth = 0
+		strokeCol = theme.Color(theme.ColorNameSeparator)
+		stroke = 1
 	}
 
+	// A device that stays up (or stays down) keeps the same colors cycle after
+	// cycle, and Refresh is a canvas repaint request — skip the no-op.
+	if row.bg.FillColor == col && row.bg.StrokeWidth == stroke {
+		return
+	}
 	row.bg.FillColor = col
+	row.bg.StrokeColor = strokeCol
+	row.bg.StrokeWidth = stroke
 	row.bg.Refresh()
 }
 
@@ -667,11 +674,22 @@ func (pm *appState) updateRowResult(device *Device) {
 	if row == nil {
 		return
 	}
-	row.success.SetText(strconv.Itoa(device.Success))
-	row.fail.SetText(strconv.Itoa(device.Fail))
-	row.total.SetText(strconv.Itoa(device.Total))
-	row.loss.SetText(formatLoss(device.Fail, device.Total))
+	setLabel(row.success, strconv.Itoa(device.Success))
+	setLabel(row.fail, strconv.Itoa(device.Fail))
+	setLabel(row.total, strconv.Itoa(device.Total))
+	setLabel(row.loss, formatLoss(device.Fail, device.Total))
 	pm.colorRow(row, device)
+}
+
+// setLabel skips Label.SetText's unconditional Refresh when the text hasn't
+// actually changed. Per cycle only one of Success/Fail moves and Loss usually
+// holds steady, so on a long list this drops a good share of the per-cycle
+// repaint requests.
+func setLabel(l *widget.Label, text string) {
+	if l.Text == text {
+		return
+	}
+	l.SetText(text)
 }
 
 // formatLoss shows failed pings as a share of the total, e.g. "%12.5". One

@@ -42,10 +42,21 @@ sudo apt install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
 - `device.go` — `Device` struct: one monitored target's IP/name plus running
   success/fail/total counters and `LastResult`.
 - `ping.go` — `pingOne` shells out to the system `ping` binary
-  (`ping -I <interface> -c 1 -W <timeout_sec> <ip>`). `runCycle` fans a ping out to every device
-  concurrently through a size-10 semaphore (`maxConcurrentPings`), calling `onResult` as each
-  device finishes and `onDone` once all have. `onResult` hands back the `*Device`, never its list
-  index — the UI is free to reorder its list (sort, drag) while a cycle is still in flight.
+  (`ping -n -I <interface> -c 1 -W <fractional_sec> <ip>`). `runCycle` fans a ping out to every
+  device concurrently, calling `onResult` as each device finishes and `onDone` once all have.
+  `onResult` hands back the `*Device`, never its list index — the UI is free to reorder its list
+  (sort, drag) while a cycle is still in flight. Three details are load-bearing for cycle time,
+  all measured against a list of unreachable hosts:
+  - `maxConcurrentPings` is 256, a backstop against forking absurd numbers of processes rather
+    than a throttle. At its old value of 10 (copied from the Python version's QThreadPool) a
+    40-device cycle took four ~1s waves — 4.0s instead of 1.0s — and on screen that read as the
+    devices being pinged one after another.
+  - the semaphore is acquired *inside* each goroutine, not in the launch loop, so process spawns
+    happen in parallel instead of queueing behind each other.
+  - `-W` is passed as fractional seconds (`pingWaitArg`). Truncating to whole seconds with a 1s
+    floor made every timeout setting below 1000ms cost a full second per unanswered host: a
+    40-device list at a 300ms timeout took 4.0s, now 0.3s.
+  Cycle wall time is therefore ~`timeout` + ~10ms regardless of device count (verified to 100).
 - `ui.go` — `appState` holds all app state (devices, settings, running/isPinging flags, sort
   column/direction, the ticker's stop channel) and builds the window content: a single-row
   toolbar (logo, add-device controls, Start/Clear pinned right via a spacer), the always-visible
@@ -57,7 +68,10 @@ sudo apt install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
   index**: `deviceRow.device` plus `indexOf`/`rowFor` mean every row callback resolves its position
   at click/update time, so reordering or removing can't leave a control aimed at the wrong device.
   `refreshRows` fully rebuilds all rows after structural changes (add/remove/clear/stop/sort);
-  `updateRowResult` is the cheap per-cycle path that only touches one row's counters/color.
+  `updateRowResult` is the cheap per-cycle path that only touches one row's counters/color, and
+  it goes through `setLabel`/`colorRow`'s equality guards — `Label.SetText` and
+  `Rectangle.Refresh` both repaint unconditionally, and on a steady list most of a cycle's
+  counters and every row color are unchanged.
   Each row ends with a reorder grip (`dragHandle`, see `resizer.go`) and the remove button.
   Dragging the grip runs `dragRow`, which accumulates vertical travel in `dragOffset`: the row is
   drawn at that offset so it follows the pointer, and once the travel covers one `rowStride()`

@@ -193,6 +193,17 @@ func TestRowReorder(t *testing.T) {
 	}
 }
 
+// TestPingWaitArg pins the -W formatting: a sub-second timeout has to reach
+// ping as a fraction, not get truncated to whole seconds.
+func TestPingWaitArg(t *testing.T) {
+	cases := map[int]string{1000: "1", 1500: "1.5", 900: "0.9", 300: "0.3", 100: "0.1", 0: "0.001"}
+	for ms, want := range cases {
+		if got := pingWaitArg(ms); got != want {
+			t.Errorf("pingWaitArg(%d) = %q, want %q", ms, got, want)
+		}
+	}
+}
+
 func TestStatusLine(t *testing.T) {
 	a := test.NewApp()
 	defer a.Quit()
