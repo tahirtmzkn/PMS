@@ -36,12 +36,31 @@ func TestSmokeBuildUI(t *testing.T) {
 		t.Errorf("ip sort desc first = %q, want 10.0.0.2", pm.devices[0].IP)
 	}
 
-	if got := formatSuccess(10, 20); got != "10 (%50)" {
-		t.Errorf("formatSuccess = %q", got)
+	if got := formatLoss(10, 20); got != "%50" {
+		t.Errorf("formatLoss = %q", got)
 	}
-	if got := formatSuccess(0, 0); got != "0" {
-		t.Errorf("formatSuccess zero = %q", got)
+	if got := formatLoss(1, 1000); got != "%0.1" {
+		t.Errorf("formatLoss fraction = %q", got)
 	}
+	if got := formatLoss(0, 0); got != "-" {
+		t.Errorf("formatLoss unpinged = %q", got)
+	}
+
+	// Loss sorts on the fail/total ratio, not the raw fail count, and
+	// never-pinged devices stay grouped ahead of measured ones.
+	pm.devices[0].Fail, pm.devices[0].Total = 1, 10 // 10%
+	pm.devices[1].Fail, pm.devices[1].Total = 5, 10 // 50%
+	pm.addDevice("10.0.0.9", "Unpinged")
+	pm.sortBy(sortLoss)
+	if pm.devices[0].Name != "Unpinged" || pm.devices[2].Fail != 5 {
+		t.Errorf("loss sort asc = %v", []string{pm.devices[0].Name, pm.devices[1].Name, pm.devices[2].Name})
+	}
+	pm.sortBy(sortLoss)
+	if pm.devices[0].Fail != 5 || pm.devices[2].Name != "Unpinged" {
+		t.Errorf("loss sort desc = %v", []string{pm.devices[0].Name, pm.devices[1].Name, pm.devices[2].Name})
+	}
+	pm.removeDevice(2)
+	pm.clearStats()
 
 	// exercise the resizer drag path (custom renderer + layout)
 	r := newColResizer(func(dx float32) { pm.colWidths[0] += dx })

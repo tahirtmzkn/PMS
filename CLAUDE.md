@@ -57,9 +57,12 @@ sudo apt install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
   sort); `updateRowResult` is the cheap per-cycle path that only touches one row's counters/color.
   Column headers (`newHeaderButton`) are plain `widget.Button`s that call `sortBy`, which toggles
   ascending/descending on repeat clicks of the same column and re-sorts `pm.devices` in place with
-  `sort.SliceStable` (IP sorts numerically via `ipLess`/`net.ParseIP`, not lexicographically). The
-  Success column's text is `success (%pct)` (`formatSuccess`) once a device has been pinged at
-  least once; sorting on Success still compares the raw count, not the percentage.
+  `sort.SliceStable` (IP sorts numerically via `ipLess`/`net.ParseIP`, not lexicographically).
+  Success/Fail/Total are raw counts; the derived **Loss** column (`formatLoss`) shows
+  `fail/total` as a percentage — one decimal, trailing `.0` trimmed, so a single failure in a long
+  run doesn't round to `%0`, and `-` before a device's first ping rather than a misleading `%0`.
+  Sorting Loss uses the ratio (`lossRatio`), not the fail count, with never-pinged devices keyed
+  to `-1` so they group together instead of tying with genuinely 0%-loss devices.
 - `settings.go` — an always-visible settings row under the toolbar (no button to show/hide it):
   validated `widget.Entry` fields for interval/timeout apply on every valid `OnChanged`; interface
   is a `widget.Select` populated once from `net.Interfaces()` rather than free text. Changing the

@@ -36,6 +36,7 @@ type deviceRow struct {
 	success *widget.Label
 	fail    *widget.Label
 	total   *widget.Label
+	loss    *widget.Label
 	content fyne.CanvasObject
 }
 
@@ -49,6 +50,7 @@ const (
 	sortSuccess
 	sortFail
 	sortTotal
+	sortLoss
 )
 
 type appState struct {
@@ -68,7 +70,7 @@ type appState struct {
 	rows          []*deviceRow
 	rowsContainer *fyne.Container
 
-	// colWidths holds the current width of the Name/IP/Success/Fail/Total
+	// colWidths holds the current width of the Name/IP/Success/Fail/Total/Loss
 	// columns, user-adjustable by dragging the header resizers.
 	colWidths []float32
 
@@ -86,6 +88,7 @@ type appState struct {
 	successHeader  *widget.Button
 	failHeaderBtn  *widget.Button
 	totalHeaderBtn *widget.Button
+	lossHeaderBtn  *widget.Button
 }
 
 func newAppState(win fyne.Window, trashIcon fyne.Resource) *appState {
@@ -96,7 +99,7 @@ func newAppState(win fyne.Window, trashIcon fyne.Resource) *appState {
 		pingTimeout:   1000,
 		interfaceName: "enp3s0",
 		rowsContainer: container.NewVBox(),
-		colWidths:     []float32{220, 160, 140, 100, 100},
+		colWidths:     []float32{220, 160, 100, 100, 100, 100},
 	}
 }
 
@@ -174,6 +177,7 @@ func (pm *appState) buildUI(pingPongIcon fyne.Resource) fyne.CanvasObject {
 	pm.successHeader = pm.newHeaderButton("Success", sortSuccess)
 	pm.failHeaderBtn = pm.newHeaderButton("Fail", sortFail)
 	pm.totalHeaderBtn = pm.newHeaderButton("Total", sortTotal)
+	pm.lossHeaderBtn = pm.newHeaderButton("Loss", sortLoss)
 
 	var headerRow *fyne.Container
 	newResizer := func(col int) fyne.CanvasObject {
@@ -193,6 +197,7 @@ func (pm *appState) buildUI(pingPongIcon fyne.Resource) fyne.CanvasObject {
 		pm.columnCell(2, pm.successHeader), newResizer(2),
 		pm.columnCell(3, pm.failHeaderBtn), newResizer(3),
 		pm.columnCell(4, pm.totalHeaderBtn), newResizer(4),
+		pm.columnCell(5, pm.lossHeaderBtn), newResizer(5),
 		layout.NewSpacer(),
 		fixedWidth(removeColWidth, widget.NewLabel("")),
 	)
@@ -322,9 +327,10 @@ func (pm *appState) newRow(idx int, device *Device) *deviceRow {
 
 	nameLbl := widget.NewLabel(device.Name)
 	ipLbl := widget.NewLabel(device.IP)
-	successLbl := widget.NewLabel(formatSuccess(device.Success, device.Total))
+	successLbl := widget.NewLabel(strconv.Itoa(device.Success))
 	failLbl := widget.NewLabel(strconv.Itoa(device.Fail))
 	totalLbl := widget.NewLabel(strconv.Itoa(device.Total))
+	lossLbl := widget.NewLabel(formatLoss(device.Fail, device.Total))
 
 	removeBtn := widget.NewButtonWithIcon("", pm.trashIcon, func() {
 		pm.removeDevice(idx)
@@ -337,11 +343,12 @@ func (pm *appState) newRow(idx int, device *Device) *deviceRow {
 		pm.columnCell(2, successLbl), blankGap(resizerWidth),
 		pm.columnCell(3, failLbl), blankGap(resizerWidth),
 		pm.columnCell(4, totalLbl), blankGap(resizerWidth),
+		pm.columnCell(5, lossLbl), blankGap(resizerWidth),
 		layout.NewSpacer(),
 		fixedWidth(removeColWidth, removeBtn),
 	)
 
-	row := &deviceRow{bg: bg, success: successLbl, fail: failLbl, total: totalLbl}
+	row := &deviceRow{bg: bg, success: successLbl, fail: failLbl, total: totalLbl, loss: lossLbl}
 	row.content = container.NewStack(bg, grid)
 	pm.colorRow(row, device)
 	return row
@@ -367,20 +374,33 @@ func (pm *appState) updateRowResult(idx int, device *Device) {
 		return
 	}
 	row := pm.rows[idx]
-	row.success.SetText(formatSuccess(device.Success, device.Total))
+	row.success.SetText(strconv.Itoa(device.Success))
 	row.fail.SetText(strconv.Itoa(device.Fail))
 	row.total.SetText(strconv.Itoa(device.Total))
+	row.loss.SetText(formatLoss(device.Fail, device.Total))
 	pm.colorRow(row, device)
 }
 
-// formatSuccess shows the success count alongside its percentage of total
-// pings, e.g. "10 (%50)"; just the count while there's no data yet.
-func formatSuccess(success, total int) string {
+// formatLoss shows failed pings as a share of the total, e.g. "%12.5". One
+// decimal is kept (a trailing ".0" is dropped) so a single failure in a long
+// run doesn't round away to "%0". A device with no pings yet shows "-" rather
+// than "%0", which would claim a clean link before anything was measured.
+func formatLoss(fail, total int) string {
 	if total == 0 {
-		return strconv.Itoa(success)
+		return "-"
 	}
-	pct := int(math.Round(float64(success) / float64(total) * 100))
-	return fmt.Sprintf("%d (%%%d)", success, pct)
+	pct := math.Round(float64(fail)/float64(total)*1000) / 10
+	return "%" + strconv.FormatFloat(pct, 'f', -1, 64)
+}
+
+// lossRatio is the sort key for the Loss column. Never-pinged devices get -1
+// so they group together ahead of every measured device instead of tying with
+// the 0%-loss ones.
+func lossRatio(d *Device) float64 {
+	if d.Total == 0 {
+		return -1
+	}
+	return float64(d.Fail) / float64(d.Total)
 }
 
 // newHeaderButton makes a column header that sorts the table by col when
@@ -416,6 +436,8 @@ func (pm *appState) sortBy(col sortColumn) {
 			lt = a.Fail < b.Fail
 		case sortTotal:
 			lt = a.Total < b.Total
+		case sortLoss:
+			lt = lossRatio(a) < lossRatio(b)
 		}
 		return lt
 	}
@@ -446,6 +468,7 @@ func (pm *appState) refreshHeaderLabels() {
 	set(pm.successHeader, "Success", sortSuccess)
 	set(pm.failHeaderBtn, "Fail", sortFail)
 	set(pm.totalHeaderBtn, "Total", sortTotal)
+	set(pm.lossHeaderBtn, "Loss", sortLoss)
 }
 
 // ipLess orders dotted-quad IPs numerically (so 9.0.0.1 sorts before
