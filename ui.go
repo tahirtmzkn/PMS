@@ -32,6 +32,10 @@ func tinted(c color.Color, a uint8) color.Color {
 // deviceRow holds the live widgets for one table row so per-cycle updates can
 // touch just the text/color instead of rebuilding the row.
 type deviceRow struct {
+	// device is what ties a row to its data. Rows are looked up by this
+	// pointer rather than by list index, so reordering the list (drag) or
+	// removing a device can't leave a row updating someone else's counters.
+	device  *Device
 	bg      *canvas.Rectangle
 	success *widget.Label
 	fail    *widget.Label
@@ -79,6 +83,11 @@ type appState struct {
 
 	sortCol sortColumn
 	sortAsc bool
+
+	// dragDevice is the device whose grip is currently being dragged, and
+	// dragOffset the vertical travel accumulated since its last row swap.
+	dragDevice *Device
+	dragOffset float32
 
 	toggleBtn      *widget.Button
 	statusLabel    *widget.Label
@@ -199,6 +208,9 @@ func (pm *appState) buildUI(pingPongIcon fyne.Resource) fyne.CanvasObject {
 		pm.columnCell(4, pm.totalHeaderBtn), newResizer(4),
 		pm.columnCell(5, pm.lossHeaderBtn), newResizer(5),
 		layout.NewSpacer(),
+		// Two blanks: one per trailing button cell (grip, remove), so the
+		// header lines up with the rows.
+		fixedWidth(removeColWidth, widget.NewLabel("")),
 		fixedWidth(removeColWidth, widget.NewLabel("")),
 	)
 
@@ -305,14 +317,14 @@ func (pm *appState) clearStats() {
 	pm.refreshRows()
 }
 
-// refreshRows fully rebuilds every row, rebinding each remove button's
-// closure to its current index. Called after any structural change
-// (add/remove/clear/stop) — mirrors the Python version's full table refresh.
+// refreshRows fully rebuilds every row. Called after any structural change
+// (add/remove/clear/stop/sort) — mirrors the Python version's full table
+// refresh. Not usable mid-drag: see swapRows.
 func (pm *appState) refreshRows() {
 	pm.rows = make([]*deviceRow, len(pm.devices))
 	objects := make([]fyne.CanvasObject, len(pm.devices))
 	for idx, device := range pm.devices {
-		row := pm.newRow(idx, device)
+		row := pm.newRow(device)
 		pm.rows[idx] = row
 		objects[idx] = row.content
 	}
@@ -321,7 +333,7 @@ func (pm *appState) refreshRows() {
 	pm.refreshStatus()
 }
 
-func (pm *appState) newRow(idx int, device *Device) *deviceRow {
+func (pm *appState) newRow(device *Device) *deviceRow {
 	bg := canvas.NewRectangle(color.Transparent)
 	bg.CornerRadius = 6
 
@@ -333,9 +345,14 @@ func (pm *appState) newRow(idx int, device *Device) *deviceRow {
 	lossLbl := widget.NewLabel(formatLoss(device.Fail, device.Total))
 
 	removeBtn := widget.NewButtonWithIcon("", pm.trashIcon, func() {
-		pm.removeDevice(idx)
+		pm.removeDevice(pm.indexOf(device))
 	})
 	removeBtn.Importance = widget.LowImportance
+
+	handle := newDragHandle(
+		func(dy float32) { pm.dragRow(device, dy) },
+		pm.endRowDrag,
+	)
 
 	grid := container.NewHBox(
 		pm.columnCell(0, nameLbl), blankGap(resizerWidth),
@@ -345,10 +362,11 @@ func (pm *appState) newRow(idx int, device *Device) *deviceRow {
 		pm.columnCell(4, totalLbl), blankGap(resizerWidth),
 		pm.columnCell(5, lossLbl), blankGap(resizerWidth),
 		layout.NewSpacer(),
+		fixedWidth(removeColWidth, handle),
 		fixedWidth(removeColWidth, removeBtn),
 	)
 
-	row := &deviceRow{bg: bg, success: successLbl, fail: failLbl, total: totalLbl, loss: lossLbl}
+	row := &deviceRow{device: device, bg: bg, success: successLbl, fail: failLbl, total: totalLbl, loss: lossLbl}
 	row.content = container.NewStack(bg, grid)
 	pm.colorRow(row, device)
 	return row
@@ -367,13 +385,113 @@ func (pm *appState) colorRow(row *deviceRow, device *Device) {
 	row.bg.Refresh()
 }
 
-// updateRowResult is the cheap per-cycle path: only the counters and
-// background color of one existing row change, no rebuild.
-func (pm *appState) updateRowResult(idx int, device *Device) {
-	if idx < 0 || idx >= len(pm.rows) {
+// indexOf returns device's current position in pm.devices, or -1 if it's gone.
+// Row callbacks resolve their index through this instead of capturing it, so a
+// reorder or removal can't leave a button aimed at the wrong device.
+func (pm *appState) indexOf(device *Device) int {
+	for i, d := range pm.devices {
+		if d == device {
+			return i
+		}
+	}
+	return -1
+}
+
+// rowFor finds the row currently showing device, or nil if it has no row (it
+// was removed while a ping cycle was still in flight for it).
+func (pm *appState) rowFor(device *Device) *deviceRow {
+	for _, row := range pm.rows {
+		if row.device == device {
+			return row
+		}
+	}
+	return nil
+}
+
+// dragRow reorders the device list while a row's grip is dragged. Vertical
+// travel accumulates until it covers a whole row, then the device swaps with
+// its neighbour, which keeps the dragged row under the pointer without needing
+// a floating drag preview. Travel is zeroed at either end of the list so
+// overshooting past the last row doesn't have to be unwound before the row
+// responds to being dragged back.
+func (pm *appState) dragRow(device *Device, dy float32) {
+	if pm.dragDevice != device {
+		pm.dragDevice = device
+		pm.dragOffset = 0
+	}
+
+	stride := pm.rowStride()
+	if stride <= 0 {
 		return
 	}
-	row := pm.rows[idx]
+
+	pm.dragOffset += dy
+	for pm.dragOffset >= stride {
+		if !pm.swapRows(pm.indexOf(device), 1) {
+			pm.dragOffset = 0
+			return
+		}
+		pm.dragOffset -= stride
+	}
+	for pm.dragOffset <= -stride {
+		if !pm.swapRows(pm.indexOf(device), -1) {
+			pm.dragOffset = 0
+			return
+		}
+		pm.dragOffset += stride
+	}
+}
+
+func (pm *appState) endRowDrag() {
+	pm.dragDevice = nil
+	pm.dragOffset = 0
+}
+
+// rowStride is the on-screen distance from one row to the next: the row's own
+// height plus the VBox padding between them. Falls back to MinSize before the
+// first layout has run.
+func (pm *appState) rowStride() float32 {
+	if len(pm.rows) == 0 {
+		return 0
+	}
+	h := pm.rows[0].content.Size().Height
+	if h <= 0 {
+		h = pm.rows[0].content.MinSize().Height
+	}
+	return h + theme.Padding()
+}
+
+// swapRows moves the device at idx one place in direction delta, swapping the
+// existing row widgets instead of calling refreshRows: a rebuild mid-drag
+// would detach the very grip the driver is delivering drag events to. A manual
+// reorder also invalidates whatever order a header arrow is claiming, so the
+// sort indicator is dropped.
+func (pm *appState) swapRows(idx, delta int) bool {
+	to := idx + delta
+	if idx < 0 || idx >= len(pm.devices) || to < 0 || to >= len(pm.devices) {
+		return false
+	}
+
+	pm.devices[idx], pm.devices[to] = pm.devices[to], pm.devices[idx]
+	pm.rows[idx], pm.rows[to] = pm.rows[to], pm.rows[idx]
+	objs := pm.rowsContainer.Objects
+	objs[idx], objs[to] = objs[to], objs[idx]
+	pm.rowsContainer.Refresh()
+
+	if pm.sortCol != sortNone {
+		pm.sortCol = sortNone
+		pm.refreshHeaderLabels()
+	}
+	return true
+}
+
+// updateRowResult is the cheap per-cycle path: only the counters and
+// background color of one existing row change, no rebuild.
+func (pm *appState) updateRowResult(device *Device) {
+	row := pm.rowFor(device)
+	if row == nil {
+		return
+	}
 	row.success.SetText(strconv.Itoa(device.Success))
 	row.fail.SetText(strconv.Itoa(device.Fail))
 	row.total.SetText(strconv.Itoa(device.Total))
@@ -554,8 +672,8 @@ func (pm *appState) tick() {
 	timeout := pm.pingTimeout
 
 	go runCycle(devices, iface, timeout,
-		func(idx int, d *Device) {
-			fyne.Do(func() { pm.updateRowResult(idx, d) })
+		func(d *Device) {
+			fyne.Do(func() { pm.updateRowResult(d) })
 		},
 		func() {
 			fyne.Do(func() {

@@ -80,6 +80,80 @@ func TestSmokeBuildUI(t *testing.T) {
 	pm.clearStats()
 }
 
+// TestRowReorder covers the drag-to-reorder grip: that travel has to cover a
+// whole row before anything moves, that pm.rows stays in step with pm.devices
+// (otherwise a cycle's counters land on the wrong row), and that dragging past
+// either end is a no-op rather than a panic.
+func TestRowReorder(t *testing.T) {
+	a := test.NewApp()
+	defer a.Quit()
+
+	win := a.NewWindow("PMS")
+	pm := newAppState(win, fyne.NewStaticResource("trash.png", trashPNG))
+	win.SetContent(pm.buildUI(fyne.NewStaticResource("ping-pong.png", pingPongPNG)))
+	win.Resize(fyne.NewSize(1200, 700))
+
+	for _, ip := range []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"} {
+		pm.addDevice(ip, ip)
+	}
+	pm.sortBy(sortIP) // an active sort, whose arrow a manual reorder must drop
+	first := pm.devices[0]
+
+	stride := pm.rowStride()
+	if stride <= 0 {
+		t.Fatalf("rowStride = %v", stride)
+	}
+
+	pm.dragRow(first, stride/2)
+	if pm.devices[0] != first {
+		t.Errorf("half a row of travel moved the device")
+	}
+	pm.dragRow(first, stride/2)
+	if pm.devices[1] != first {
+		t.Errorf("a full row of travel did not move the device down")
+	}
+	if pm.sortCol != sortNone {
+		t.Errorf("sort indicator survived a manual reorder")
+	}
+	for i, d := range pm.devices {
+		if pm.rows[i].device != d {
+			t.Fatalf("row %d bound to %q, want %q", i, pm.rows[i].device.IP, d.IP)
+		}
+	}
+
+	// overshooting the end clamps at the last row instead of panicking
+	pm.dragRow(first, stride*5)
+	if pm.devices[len(pm.devices)-1] != first {
+		t.Errorf("device did not reach the bottom row")
+	}
+	pm.endRowDrag()
+
+	// counters must follow the device to wherever its row now is
+	first.Success, first.Total = 2, 2
+	pm.updateRowResult(first)
+	if got := pm.rowFor(first).success.Text; got != "2" {
+		t.Errorf("success text = %q, want 2", got)
+	}
+
+	// a device removed while its ping is still in flight simply has no row
+	pm.removeDevice(pm.indexOf(first))
+	if pm.rowFor(first) != nil {
+		t.Errorf("removed device still has a row")
+	}
+	pm.updateRowResult(first)
+
+	// the grip widget itself: renderer plus drag hooks
+	moved, ended := float32(0), false
+	h := newDragHandle(func(dy float32) { moved += dy }, func() { ended = true })
+	_ = test.WidgetRenderer(h)
+	h.Refresh()
+	h.Dragged(&fyne.DragEvent{Dragged: fyne.NewDelta(0, 12)})
+	h.DragEnd()
+	if moved != 12 || !ended {
+		t.Errorf("handle drag = %v, ended = %v", moved, ended)
+	}
+}
+
 func TestStatusLine(t *testing.T) {
 	a := test.NewApp()
 	defer a.Quit()

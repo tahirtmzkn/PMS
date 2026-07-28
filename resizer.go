@@ -55,6 +55,44 @@ func blankGap(w float32) fyne.CanvasObject {
 	return fixedWidth(w, canvas.NewRectangle(color.Transparent))
 }
 
+// dragHandle is the per-row reorder grip that sits just left of the remove
+// button. It extends widget.Button rather than being a hand-rolled widget so
+// its footprint and glyph size are identical to the remove button's by
+// construction (both draw their icon at theme.SizeNameInlineIcon), and adds
+// the vertical drag reporting a plain Button lacks. No OnTapped is set: a
+// click that never crosses the drag threshold is deliberately a no-op.
+type dragHandle struct {
+	widget.Button
+	onDrag    func(dy float32)
+	onDragEnd func()
+}
+
+func newDragHandle(onDrag func(dy float32), onDragEnd func()) *dragHandle {
+	h := &dragHandle{onDrag: onDrag, onDragEnd: onDragEnd}
+	h.Icon = theme.MenuIcon()
+	h.Importance = widget.LowImportance
+	h.ExtendBaseWidget(h)
+	return h
+}
+
+// Dragged receives the pointer delta since the previous event (not since the
+// drag started), which is what makes accumulating it in appState correct.
+func (h *dragHandle) Dragged(e *fyne.DragEvent) {
+	if h.onDrag != nil {
+		h.onDrag(e.Dragged.DY)
+	}
+}
+
+func (h *dragHandle) DragEnd() {
+	if h.onDragEnd != nil {
+		h.onDragEnd()
+	}
+}
+
+func (h *dragHandle) Cursor() desktop.Cursor {
+	return desktop.PointerCursor
+}
+
 // themedRect is a filled rectangle whose color is resolved from the live
 // theme at render time rather than snapshotted at construction. buildUI runs
 // before the theme variant has settled, so a plain

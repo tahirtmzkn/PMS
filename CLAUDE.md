@@ -44,17 +44,27 @@ sudo apt install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
 - `ping.go` — `pingOne` shells out to the system `ping` binary
   (`ping -I <interface> -c 1 -W <timeout_sec> <ip>`). `runCycle` fans a ping out to every device
   concurrently through a size-10 semaphore (`maxConcurrentPings`), calling `onResult` as each
-  device finishes and `onDone` once all have.
+  device finishes and `onDone` once all have. `onResult` hands back the `*Device`, never its list
+  index — the UI is free to reorder its list (sort, drag) while a cycle is still in flight.
 - `ui.go` — `appState` holds all app state (devices, settings, running/isPinging flags, sort
   column/direction, the ticker's stop channel) and builds the window content: a single-row
   toolbar (logo, add-device controls, Start/Clear pinned right via a spacer), the always-visible
   settings row, then the sortable header and table. Rows are hand-built widgets (a
   `canvas.Rectangle` background + a `container.NewGridWithColumns` grid, stacked), not a
   `widget.Table` — this was a deliberate choice: `widget.Table` recycles cell widgets via
-  `CreateCell`/`UpdateCell`, which is a bad fit for a per-row remove button whose callback must
-  stay bound to the right row index. `refreshRows` fully rebuilds all rows (and rebinds each
-  remove button's closure to its current index) after structural changes (add/remove/clear/stop/
-  sort); `updateRowResult` is the cheap per-cycle path that only touches one row's counters/color.
+  `CreateCell`/`UpdateCell`, which is a bad fit for per-row controls (the remove button and the
+  reorder grip) that have to stay bound to their own device. **Rows are keyed by `*Device`, not by
+  index**: `deviceRow.device` plus `indexOf`/`rowFor` mean every row callback resolves its position
+  at click/update time, so reordering or removing can't leave a control aimed at the wrong device.
+  `refreshRows` fully rebuilds all rows after structural changes (add/remove/clear/stop/sort);
+  `updateRowResult` is the cheap per-cycle path that only touches one row's counters/color.
+  Each row ends with a reorder grip (`dragHandle`, see `resizer.go`) and the remove button.
+  Dragging the grip runs `dragRow`, which accumulates vertical travel in `dragOffset` until it
+  covers one `rowStride()` (row height + `theme.Padding()`), then calls `swapRows`. `swapRows`
+  deliberately does *not* call `refreshRows` — a rebuild mid-drag would destroy the very grip
+  widget the driver is delivering `Dragged` events to — it swaps the existing rows in
+  `devices`/`rows`/`rowsContainer.Objects` together and clears `sortCol` (a hand-ordered list
+  makes any header arrow a lie).
   Column headers (`newHeaderButton`) are plain `widget.Button`s that call `sortBy`, which toggles
   ascending/descending on repeat clicks of the same column and re-sorts `pm.devices` in place with
   `sort.SliceStable` (IP sorts numerically via `ipLess`/`net.ParseIP`, not lexicographically).
@@ -72,7 +82,11 @@ sudo apt install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
   is resolved from the live theme *at render time* — `buildUI` runs before the theme variant has
   settled, so `canvas.NewRectangle(theme.Color(...))` there silently picks dark-variant colors and
   renders near-black in a light window; this bit both the column dividers and the header band),
-  `colResizer` (drag handle: `resizerWidth` grab area, `dividerThickness` visible line), and
+  `colResizer` (column divider: `resizerWidth` grab area, `dividerThickness` visible line),
+  `dragHandle` (the row-reorder grip; it *extends `widget.Button`* with `Dragged`/`DragEnd` rather
+  than being hand-rolled, which is what makes its footprint and glyph size identical to the remove
+  button beside it — both draw at `theme.SizeNameInlineIcon` — and it deliberately has no
+  `OnTapped`, so a click that never crosses the drag threshold does nothing), and
   `singleColLayout`, which reads its width from a closure over `appState.colWidths` so a drag only
   needs a `Refresh()` rather than rebuilding widgets.
 - `theme.go` — `appTheme` wraps `theme.DefaultTheme()` and overrides just `ColorNameSuccess`

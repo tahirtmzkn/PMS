@@ -27,14 +27,16 @@ func pingOne(ip, iface string, timeoutMs int) bool {
 
 // runCycle pings every device concurrently (bounded by maxConcurrentPings),
 // invoking onResult as each device's ping completes and onDone once all have.
-func runCycle(devices []*Device, iface string, timeoutMs int, onResult func(idx int, d *Device), onDone func()) {
+// onResult identifies the device by pointer, not by list position: the UI can
+// reorder its list (sort, drag) while a cycle is still in flight.
+func runCycle(devices []*Device, iface string, timeoutMs int, onResult func(d *Device), onDone func()) {
 	sem := make(chan struct{}, maxConcurrentPings)
 	var wg sync.WaitGroup
 
-	for idx, device := range devices {
+	for _, device := range devices {
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(idx int, d *Device) {
+		go func(d *Device) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
@@ -46,8 +48,8 @@ func runCycle(devices []*Device, iface string, timeoutMs int, onResult func(idx 
 			} else {
 				d.Fail++
 			}
-			onResult(idx, d)
-		}(idx, device)
+			onResult(d)
+		}(device)
 	}
 
 	go func() {
