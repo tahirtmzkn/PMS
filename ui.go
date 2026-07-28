@@ -13,13 +13,17 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
 
-var (
-	successColor = color.NRGBA{R: 76, G: 175, B: 80, A: 90}
-	failColor    = color.NRGBA{R: 244, G: 67, B: 54, A: 90}
-)
+// tinted returns c with alpha a, used to derive row-highlight colors from the
+// same theme colors the Start/Stop button already uses — one source of truth
+// instead of separate hardcoded hues, and it stays correct across themes.
+func tinted(c color.Color, a uint8) color.Color {
+	r, g, b, _ := c.RGBA()
+	return color.NRGBA{R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: a}
+}
 
 // deviceRow holds the live widgets for one table row so per-cycle updates can
 // touch just the text/color instead of rebuilding the row.
@@ -49,10 +53,8 @@ type appState struct {
 	rows          []*deviceRow
 	rowsContainer *fyne.Container
 
-	toggleBtn     *widget.Button
-	topBox        *fyne.Container
-	settingsPanel *fyne.Container
-	ifaceSelect   *widget.Select
+	toggleBtn   *widget.Button
+	ifaceSelect *widget.Select
 }
 
 func newAppState(win fyne.Window, trashIcon fyne.Resource) *appState {
@@ -73,11 +75,9 @@ func fixedWidth(w float32, obj fyne.CanvasObject) fyne.CanvasObject {
 }
 
 func (pm *appState) buildUI(pingPongIcon fyne.Resource) fyne.CanvasObject {
-	const controlWidth = 260
-
 	icon := canvas.NewImageFromResource(pingPongIcon)
 	icon.FillMode = canvas.ImageFillContain
-	icon.SetMinSize(fyne.NewSize(48, 48))
+	icon.SetMinSize(fyne.NewSize(40, 40))
 
 	ipEntry := widget.NewEntry()
 	ipEntry.SetPlaceHolder("IP address")
@@ -93,29 +93,26 @@ func (pm *appState) buildUI(pingPongIcon fyne.Resource) fyne.CanvasObject {
 	ipEntry.OnSubmitted = func(string) { addBtn.OnTapped() }
 	nameEntry.OnSubmitted = func(string) { addBtn.OnTapped() }
 
-	left := container.NewVBox(
-		fixedWidth(controlWidth, ipEntry),
-		fixedWidth(controlWidth, nameEntry),
-		fixedWidth(controlWidth, addBtn),
-	)
-
 	pm.toggleBtn = widget.NewButton("Start", pm.toggleStartStop)
 	pm.toggleBtn.Importance = widget.SuccessImportance
 
 	clearBtn := widget.NewButton("Clear", pm.clearStats)
-	clearBtn.Importance = widget.WarningImportance
+	clearBtn.Importance = widget.MediumImportance
 
-	settingsBtn := widget.NewButton("Settings", pm.toggleSettings)
-
-	right := container.NewVBox(
-		fixedWidth(controlWidth, pm.toggleBtn),
-		fixedWidth(controlWidth, clearBtn),
-		fixedWidth(controlWidth, settingsBtn),
+	// Single-row toolbar: logo, add-device controls on the left, monitor
+	// controls pinned to the right via a spacer — everything on one baseline
+	// instead of two uneven stacked columns.
+	topBar := container.NewHBox(
+		icon,
+		fixedWidth(200, ipEntry),
+		fixedWidth(200, nameEntry),
+		addBtn,
+		layout.NewSpacer(),
+		pm.toggleBtn,
+		clearBtn,
 	)
 
-	topBar := container.NewHBox(icon, left, layout.NewSpacer(), right)
-
-	pm.settingsPanel = pm.buildSettingsPanel()
+	settingsRow := pm.buildSettingsPanel()
 
 	bold := fyne.TextStyle{Bold: true}
 	header := container.NewGridWithColumns(6,
@@ -127,10 +124,16 @@ func (pm *appState) buildUI(pingPongIcon fyne.Resource) fyne.CanvasObject {
 		widget.NewLabel(""),
 	)
 
-	pm.topBox = container.NewVBox(topBar, pm.settingsPanel, widget.NewSeparator(), header)
+	top := container.NewVBox(
+		container.NewPadded(topBar),
+		widget.NewSeparator(),
+		container.NewPadded(settingsRow),
+		widget.NewSeparator(),
+		header,
+	)
 	scroll := container.NewVScroll(pm.rowsContainer)
 
-	return container.NewBorder(pm.topBox, nil, nil, nil, scroll)
+	return container.NewBorder(top, nil, nil, nil, scroll)
 }
 
 func (pm *appState) addDevice(ip, name string) {
@@ -205,9 +208,9 @@ func (pm *appState) colorRow(row *deviceRow, device *Device) {
 	col := color.Color(color.Transparent)
 	if pm.running {
 		if device.LastResult {
-			col = successColor
+			col = tinted(theme.SuccessColor(), 90)
 		} else {
-			col = failColor
+			col = tinted(theme.ErrorColor(), 90)
 		}
 	}
 	row.bg.FillColor = col

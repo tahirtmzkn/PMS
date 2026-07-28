@@ -44,10 +44,10 @@ func listInterfaces() []string {
 	return names
 }
 
-// buildSettingsPanel builds the inline (initially hidden) settings row shown
-// under the top bar. Each field applies immediately once valid; changing the
-// interval or interface while running restarts the ticker so it takes effect
-// on the next cycle instead of waiting for a manual Stop/Start.
+// buildSettingsPanel builds the always-visible settings row shown under the
+// top bar. Each field applies immediately once valid; changing the interval
+// or interface while running restarts the ticker so it takes effect on the
+// next cycle instead of waiting for a manual Stop/Start.
 func (pm *appState) buildSettingsPanel() *fyne.Container {
 	intervalEntry := widget.NewEntry()
 	intervalEntry.SetText(strconv.Itoa(pm.pingInterval))
@@ -85,25 +85,9 @@ func (pm *appState) buildSettingsPanel() *fyne.Container {
 	})
 	pm.ifaceSelect.SetSelected(pm.interfaceName)
 
-	row := container.NewHBox(
+	return container.NewHBox(
 		widget.NewLabel("Interval (s)"), fixedWidth(70, intervalEntry),
 		widget.NewLabel("Timeout (ms)"), fixedWidth(90, timeoutEntry),
 		widget.NewLabel("Interface"), fixedWidth(160, pm.ifaceSelect),
 	)
-
-	panel := container.NewVBox(widget.NewSeparator(), container.NewPadded(row))
-	panel.Hide()
-	return panel
-}
-
-// toggleSettings shows/hides the inline settings panel, refreshing the
-// interface list each time it's opened.
-func (pm *appState) toggleSettings() {
-	if pm.settingsPanel.Visible() {
-		pm.settingsPanel.Hide()
-	} else {
-		pm.ifaceSelect.SetOptions(listInterfaces())
-		pm.settingsPanel.Show()
-	}
-	pm.topBox.Refresh()
 }
