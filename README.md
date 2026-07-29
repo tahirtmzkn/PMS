@@ -17,6 +17,8 @@ Features
 - A status line summarising how many devices are up, down, or not yet pinged.
 - Sortable and resizable columns, and rows you can drag into the order you want.
 - Interval, timeout and network interface are set in the window and apply immediately.
+- The device list is saved automatically, so closing the app and reopening it gets the same
+  devices back, in the same order.
 
 
 Requirements
@@ -85,8 +87,33 @@ Settings:
 
 Out-of-range input is simply not applied, so a half-typed value never takes effect.
 
-The device list and the settings live for the session only — nothing is written to disk, so
-both start fresh on the next launch.
+The settings themselves live for the session only and start at those defaults on every launch;
+the device list does not — see below.
+
+
+Saved device list
+-----------------------
+The list of devices is written to `~/.config/pms/config.json` and read back at startup, so the
+app reopens with the same devices in the same order. It is saved whenever the list changes —
+adding, removing, sorting or dragging a row — not on exit, so a crash or a `kill` doesn't lose
+it either.
+
+Only what you chose is stored, one entry per device:
+```json
+{
+  "devices": [
+    { "ip": "10.0.0.1", "name": "Alpha" },
+    { "ip": "10.0.0.2", "name": "Unknown" }
+  ]
+}
+```
+
+Counters are not saved — they measure one run, so every launch starts at zero. Hostnames are not
+saved either: each device is asked for its SNMP hostname again on startup, so the column shows
+what the device says now rather than what it said last week. The file is plain JSON in the
+standard config directory, so it can be edited by hand or copied to another machine; if it ever
+turns out to be unreadable the app starts with an empty list and leaves the file alone (the next
+change to the list replaces it).
 
 
 How it works
@@ -126,6 +153,7 @@ $ go test ./...                  # headless smoke test
 
 `smoke_test.go` builds the entire UI against Fyne's headless test app — no window opens — and
 exercises adding/removing devices, sorting, the column-resize drag, the row-reorder drag and
-its animation, loss formatting, the status line and SNMP hostname resolution (with the lookup
-stubbed, so tests never fork `snmpget`). It's the intended way to check UI changes, especially
-to the custom widgets, without putting a window on the screen.
+its animation, loss formatting, the status line, SNMP hostname resolution (with the lookup
+stubbed, so tests never fork `snmpget`) and the saved-device-list round trip (against a temp
+directory, never your real config). It's the intended way to check UI changes, especially to the
+custom widgets, without putting a window on the screen.

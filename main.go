@@ -29,7 +29,19 @@ func main() {
 	win := a.NewWindow("PMS")
 
 	pm := newAppState(win, trashIcon)
+	if path, err := defaultConfigPath(); err != nil {
+		// No usable config directory: the app still runs, the list just won't
+		// outlive it.
+		fyne.LogError("no config directory, the device list will not be saved", err)
+	} else {
+		pm.configFile = path
+	}
+
 	win.SetContent(pm.buildUI(pingPongIcon))
+	// The saved list goes in after the content is built, so the rows the
+	// hostname lookups write into exist. Those lookups call fyne.Do before the
+	// event loop is up, which is fine — the driver queues them until it starts.
+	pm.restoreDevices()
 	win.Resize(fyne.NewSize(1200, 700))
 	win.ShowAndRun()
 }

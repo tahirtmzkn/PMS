@@ -104,6 +104,12 @@ type appState struct {
 	// rather than a direct call so tests can stub it instead of shelling out.
 	lookupName func(ip, iface string) string
 
+	// configFile is the JSON file the device list is saved to and restored from
+	// (see config.go). Empty means no persistence, which is what newAppState
+	// leaves it as: main.go points it at the real config file, so a test that
+	// doesn't ask for persistence cannot write over the user's own list.
+	configFile string
+
 	// dragDevice is the device whose grip is currently being dragged, and
 	// dragOffset the vertical travel accumulated since its last row swap.
 	dragDevice *Device
@@ -358,6 +364,7 @@ func (pm *appState) addDevice(ip, name string) <-chan struct{} {
 	device := &Device{IP: ip, Name: name, Hostname: resolvingHostname}
 	pm.devices = append(pm.devices, device)
 	pm.refreshRows()
+	pm.persistDevices()
 
 	return pm.startHostnameLookup(device)
 }
@@ -400,6 +407,7 @@ func (pm *appState) removeDevice(idx int) {
 	}
 	pm.devices = append(pm.devices[:idx], pm.devices[idx+1:]...)
 	pm.refreshRows()
+	pm.persistDevices()
 }
 
 func (pm *appState) clearStats() {
@@ -628,6 +636,9 @@ func (pm *appState) endRowDrag() {
 	if row := pm.rowFor(device); row != nil {
 		pm.animateRowOffset(row, offset)
 	}
+	// Saved here rather than in swapRows, so one drag across the table is one
+	// write instead of one per row it passed.
+	pm.persistDevices()
 }
 
 // liftRow picks a row up: opaque background, thin outline, painted last.
@@ -830,6 +841,9 @@ func (pm *appState) sortBy(col sortColumn) {
 
 	pm.refreshHeaderLabels()
 	pm.refreshRows()
+	// The saved list is an ordered one, and a sort is what the user now wants
+	// that order to be.
+	pm.persistDevices()
 }
 
 func (pm *appState) refreshHeaderLabels() {

@@ -2,6 +2,8 @@ package main
 
 import (
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -270,6 +272,181 @@ func TestHostnameLookup(t *testing.T) {
 	pm.applyResolvedHostname(named, "too-late")
 	if named.Hostname != "sw-core-01" {
 		t.Errorf("removed device's hostname was overwritten with %q", named.Hostname)
+	}
+}
+
+// TestConfigPersistence covers the saved device list: that the list is written
+// on every change to it (add, sort, remove), that a second run gets the same
+// devices back in the same order, and that counters and hostnames are *not*
+// restored — counters belong to one run, and a hostname is re-asked so a device
+// that has changed or gone away isn't shown a remembered name.
+func TestConfigPersistence(t *testing.T) {
+	a := test.NewApp()
+	defer a.Quit()
+
+	path := filepath.Join(t.TempDir(), "pms", "config.json")
+
+	newSession := func() *appState {
+		win := a.NewWindow("PMS")
+		pm := newAppState(win, fyne.NewStaticResource("trash.png", trashPNG))
+		win.SetContent(pm.buildUI(fyne.NewStaticResource("ping-pong.png", pingPongPNG)))
+		pm.configFile = path
+		pm.lookupName = func(ip, iface string) string {
+			if ip == "10.0.0.2" {
+				return "sw-core-02"
+			}
+			return ""
+		}
+		return pm
+	}
+
+	// A run with no config file yet is a first run, not an error.
+	first := newSession()
+	if got := first.restoreDevices(); got != nil {
+		t.Errorf("restore with no config file returned %d lookups, want none", len(got))
+	}
+	if len(first.devices) != 0 {
+		t.Fatalf("restore with no config file added %d devices", len(first.devices))
+	}
+
+	<-first.addDevice("10.0.0.3", "Gamma")
+	<-first.addDevice("10.0.0.2", "")
+	<-first.addDevice("10.0.0.1", "Alpha")
+	first.devices[0].Success, first.devices[0].Total = 7, 7
+	first.sortBy(sortIP) // the order the second run has to come back in
+
+	// Reopening the app: same devices, same order, names kept.
+	second := newSession()
+	for _, done := range second.restoreDevices() {
+		<-done
+	}
+	wantIPs := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}
+	if len(second.devices) != len(wantIPs) {
+		t.Fatalf("restored %d devices, want %d", len(second.devices), len(wantIPs))
+	}
+	for i, ip := range wantIPs {
+		if got := second.devices[i].IP; got != ip {
+			t.Errorf("restored device %d = %q, want %q", i, got, ip)
+		}
+		if second.rows[i].device != second.devices[i] {
+			t.Errorf("restored row %d is not bound to device %d", i, i)
+		}
+	}
+	if got := second.devices[0].Name; got != "Alpha" {
+		t.Errorf("restored name = %q, want Alpha", got)
+	}
+	// a device added with a blank name comes back as "Unknown", same as it went
+	if got := second.devices[1].Name; got != unknownName {
+		t.Errorf("restored blank name = %q, want %q", got, unknownName)
+	}
+	// hostnames are re-resolved, not read from the file
+	if got := second.devices[1].Hostname; got != "sw-core-02" {
+		t.Errorf("re-resolved hostname = %q, want sw-core-02", got)
+	}
+	if got := second.rowFor(second.devices[1]).hostname.Text; got != "sw-core-02" {
+		t.Errorf("restored row hostname = %q, want sw-core-02", got)
+	}
+	if got := second.devices[2].Hostname; got != emptyHostname {
+		t.Errorf("unanswered restored hostname = %q, want %q", got, emptyHostname)
+	}
+	// counters are a per-run measurement and start clean
+	for i, d := range second.devices {
+		if d.Total != 0 || d.Success != 0 || d.Fail != 0 {
+			t.Errorf("restored device %d carried counters %d/%d/%d", i, d.Success, d.Fail, d.Total)
+		}
+	}
+
+	// a removal is saved too, so it doesn't come back on the next run
+	second.removeDevice(1)
+	third := newSession()
+	for _, done := range third.restoreDevices() {
+		<-done
+	}
+	if len(third.devices) != 2 || third.devices[1].IP != "10.0.0.3" {
+		t.Errorf("after remove, restored %v", []string{third.devices[0].IP, third.devices[len(third.devices)-1].IP})
+	}
+
+	// a drag saves the hand-made order
+	third.dragRow(third.devices[0], third.rowStride())
+	third.endRowDrag()
+	fourth := newSession()
+	for _, done := range fourth.restoreDevices() {
+		<-done
+	}
+	if fourth.devices[0].IP != "10.0.0.3" {
+		t.Errorf("dragged order not saved, first = %q, want 10.0.0.3", fourth.devices[0].IP)
+	}
+
+	// with no config file set nothing is written and nothing is read: this is
+	// what keeps every other test off the user's real config
+	off := newSession()
+	off.configFile = ""
+	<-off.addDevice("10.9.9.9", "Nowhere")
+	if got := off.restoreDevices(); got != nil {
+		t.Errorf("restore with persistence off returned %d lookups", len(got))
+	}
+	saved, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	for _, d := range saved.Devices {
+		if d.IP == "10.9.9.9" {
+			t.Errorf("device was written despite persistence being off")
+		}
+	}
+}
+
+// TestConfigFile covers the file layer on its own: the round trip, the
+// atomic-replace behaviour, and unreadable input.
+func TestConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nested", "config.json")
+
+	// A missing file reads as an empty config, so a first run needs no special case.
+	cfg, err := loadConfig(path)
+	if err != nil || len(cfg.Devices) != 0 {
+		t.Fatalf("missing file: %v, %d devices", err, len(cfg.Devices))
+	}
+
+	want := savedConfig{Devices: []savedDevice{{IP: "10.0.0.1", Name: "Alpha"}, {IP: "10.0.0.2", Name: unknownName}}}
+	if err := saveConfig(path, want); err != nil { // creates the directory too
+		t.Fatalf("saveConfig: %v", err)
+	}
+	got, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if len(got.Devices) != 2 || got.Devices[0] != want.Devices[0] || got.Devices[1] != want.Devices[1] {
+		t.Errorf("round trip = %+v, want %+v", got.Devices, want.Devices)
+	}
+
+	// A second save replaces the first, and leaves no temp file behind.
+	if err := saveConfig(path, savedConfig{Devices: []savedDevice{{IP: "10.0.0.9", Name: "Only"}}}); err != nil {
+		t.Fatalf("second saveConfig: %v", err)
+	}
+	got, err = loadConfig(path)
+	if err != nil || len(got.Devices) != 1 || got.Devices[0].IP != "10.0.0.9" {
+		t.Errorf("after replace = %+v (%v)", got.Devices, err)
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "config.json" {
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		t.Errorf("config dir holds %v, want just config.json", names)
+	}
+
+	// Garbage is reported, not silently treated as an empty list — the caller
+	// leaves the file alone instead of overwriting whatever is in there.
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, err := loadConfig(path); err == nil {
+		t.Errorf("corrupt config file did not report an error")
 	}
 }
 

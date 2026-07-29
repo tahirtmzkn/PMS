@@ -28,7 +28,8 @@ themselves. Verify with `go build`, `go vet`, and `go test`, then describe what 
 off.
 
 `smoke_test.go` is the only test: it builds the whole UI against `test.NewApp()` (headless, no
-window opens) and exercises add/remove/sort/resize-drag/formatting. It exists so UI changes —
+window opens) and exercises add/remove/sort/resize-drag/formatting plus the config round trip
+(pointed at `t.TempDir()`, never the real `~/.config/pms`). It exists so UI changes —
 especially custom widgets like `colResizer` — can be checked for panics and logic regressions
 without opening a window on the user's screen. Extend it rather than launching the app.
 
@@ -136,6 +137,23 @@ sudo apt install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
   lookup picks the source, which it does correctly.
   The community/version are constants, not settings fields — a wrong one just yields "Unknown".
   `appState.lookupName` holds this function so tests can stub it instead of forking a subprocess.
+- `config.go` — saves and restores the device list as JSON at
+  `os.UserConfigDir()/pms/config.json`. Deliberate choices: only `{ip, name}` per device is
+  stored — counters measure one run, and `Hostname` is re-asked over SNMP on load (a remembered
+  sysName would go stale silently, and `restoreDevices` starts the same lookup `addDevice` does,
+  so a restored row shows `Resolving…` then the live answer or `Empty`); saving happens at the
+  four places the *list* changes (`addDevice`, `removeDevice`, `sortBy`, `endRowDrag`) rather
+  than in a window-close hook, so a crash or `kill` doesn't lose it — `endRowDrag` rather than
+  `swapRows` so one drag across the table is one write; `saveConfig` writes a temp file in the
+  same directory and renames it over the target, so an interrupted save can't replace a good
+  list with a truncated one; a missing file is a first run (not an error) while a corrupt one is
+  logged and left alone rather than overwritten. `appState.configFile` holds the path and is
+  **empty by default** — `main.go` fills it in from `defaultConfigPath()`, which is what keeps
+  every test that doesn't opt in from writing over the user's real device list. `restoreDevices`
+  is called from `main.go` *after* `SetContent` (the lookups need rows to write into) and
+  returns the lookups' completion channels for tests; its `fyne.Do` callbacks landing before
+  `ShowAndRun` is safe, the glfw driver queues them on an unbounded channel until the loop
+  starts.
 - `settings.go` — an always-visible settings row under the toolbar (no button to show/hide it):
   validated `widget.Entry` fields for interval/timeout apply on every valid `OnChanged`; interface
   is a `widget.Select` populated once from `net.Interfaces()` rather than free text. Changing the
