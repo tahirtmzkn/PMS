@@ -29,7 +29,17 @@ off.
 
 `smoke_test.go` is the only test: it builds the whole UI against `test.NewApp()` (headless, no
 window opens) and exercises add/remove/sort/resize-drag/formatting plus the config round trip
-(pointed at `t.TempDir()`, never the real `~/.config/pms`). It exists so UI changes —
+(pointed at `t.TempDir()`, never the real `~/.config/pms`).
+
+It is expected to stay clean under `go test -race ./...`, which constrains how tests drive
+hostname lookups. `test.NewApp`'s driver runs `fyne.Do` *inline on the calling goroutine*
+(`test/driver.go`) instead of marshalling it to a UI thread, so any code path that starts several
+lookups at once (`restoreDevices`, `refreshHostnames`) would, in a test, have several goroutines
+inside Fyne's widget code simultaneously — a race in Fyne's own font cache that the real app
+cannot hit, since its driver funnels every `fyne.Do` onto one goroutine. Tests therefore let one
+answer land at a time: either add devices one at a time and wait on `addDevice`'s channel, or use
+the `serialRestore` helper, which parks each stubbed lookup on a per-IP gate and releases them in
+list order. It exists so UI changes —
 especially custom widgets like `colResizer` — can be checked for panics and logic regressions
 without opening a window on the user's screen. Extend it rather than launching the app.
 
@@ -123,6 +133,15 @@ sudo apt install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
   returns the lookup's completion channel purely so tests can wait for it; the UI ignores it.
   So "Unknown" in Name means *you didn't name it*, while "Empty" in Hostname means *it didn't
   answer* — two different facts that the old single-column behaviour conflated.
+  `start()` re-asks *every* device via `refreshHostnames` (each column back to `resolvingHostname`
+  first), so a run begins from what the devices say now rather than from an answer that may be
+  hours old — a switch renamed, replaced or only now reachable shows up. `stop()` deliberately
+  does not: stopping is the app going quiet. That makes overlapping lookups routine (a Stop/Start
+  while a query is still parked on a dead host for its ~2s budget), so `appState.hostnameGen`
+  counts refreshes, `startHostnameLookup` captures the generation it started in, and its `fyne.Do`
+  callback drops the answer if a later refresh has since superseded it — otherwise the old query's
+  "Empty" lands on top of the new query's name. `start()` returns the lookups' completion channels
+  for the same reason `addDevice` does: tests wait, the UI ignores.
 - `snmp.go` — `snmpSysName` shells out to `snmpget` for `sysName.0`. Details worth keeping:
   the OID is written numerically (`1.3.6.1.2.1.1.5.0`) because Debian/Ubuntu's `snmp` package
   disables MIB loading, where the symbolic `SNMPv2-MIB::sysName.0` is rejected outright; `-Oqv`

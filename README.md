@@ -13,7 +13,8 @@ Features
 - The whole list is pinged at once, so a cycle takes about as long as the timeout no matter how
   many devices are on it.
 - Two name columns: **Name** is your own label for the device (optional — blank rows read
-  `Unknown`), while **Hostname** is filled in automatically from the device's own SNMP hostname.
+  `Unknown`), while **Hostname** is filled in automatically from the device's own SNMP hostname —
+  when the device is added, and again every time you press **Start**.
 - A status line summarising how many devices are up, down, or not yet pinged.
 - Sortable and resizable columns, and rows you can drag into the order you want.
 - Interval, timeout and network interface are set in the window and apply immediately.
@@ -73,7 +74,9 @@ Using it
    reads `Unknown` there. Either way the **Hostname** column shows `Resolving…` for a moment and
    then the device's own SNMP hostname, or `Empty` if it didn't answer.
 3. **Start** begins the cycles, **Stop** ends them, **Clear** zeroes every counter without
-   touching the list.
+   touching the list. Start also re-asks every device for its hostname, so the **Hostname**
+   column goes back to `Resolving…` for a moment and then shows what the devices say now — a
+   Stop/Start is how you refresh those names after swapping or renaming a device.
 4. Click headers to sort, drag a header divider to resize a column, drag a row's grip to move
    it, and use the bin button to remove a device.
 
@@ -125,7 +128,8 @@ yet, so a list full of unreachable hosts can't build up a backlog. Rows are boun
 by identity, not by list position, so sorting, dragging or removing a device mid-cycle can
 never land one device's counters on another's row.
 
-**Hostnames.** Every added device gets, in the background:
+**Hostnames.** Every added device — and every device on the list each time a run is started —
+gets, in the background:
 ```
 snmpget -v2c -c public -t 1 -r 1 -Oqv [--clientaddr=<source>] <ip> 1.3.6.1.2.1.1.5.0
 ```
@@ -138,6 +142,11 @@ reading `Empty`. The **Name** column is never touched by this — it stays whate
 target's own subnet: one interface routinely carries several subnets, and binding the query to
 the wrong one gets it sent with a source address the device can't reply to. For off-subnet
 targets the kernel's route lookup picks the source instead.
+
+Pressing **Stop** does not fire any queries — stopping is the app going quiet. Because one lookup
+can sit on an unresponsive host for a couple of seconds, a quick Stop/Start can leave an earlier
+round of queries still out; those answers are discarded when they arrive, so the newest round is
+always what the column shows.
 
 SNMP version and community are constants at the top of `snmp.go` (`v2c`, `public`) — change
 them there if your gear uses something else.

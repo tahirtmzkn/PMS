@@ -275,9 +275,46 @@ func TestHostnameLookup(t *testing.T) {
 	}
 }
 
+// serialRestore restores the saved device list and lets the hostname lookups it
+// starts answer one at a time, in list order, returning once they all have.
+//
+// The one-at-a-time part is a test-driver detail. The real app starts every
+// lookup at once and fyne.Do funnels the answers onto the single UI goroutine;
+// test.NewApp's driver instead runs fyne.Do inline on whichever goroutine calls
+// it, so letting the answers overlap would put several goroutines inside Fyne's
+// widget code simultaneously — something the app never does, and which -race
+// reports (in Fyne's own font cache, not in this package).
+func serialRestore(pm *appState, hostnames map[string]string) {
+	// Built before any lookup starts and never written again, so the parked
+	// goroutines only ever read it.
+	gates := make(map[string]chan struct{}, len(hostnames))
+	for ip := range hostnames {
+		gates[ip] = make(chan struct{})
+	}
+	pm.lookupName = func(ip, iface string) string {
+		if gate, ok := gates[ip]; ok {
+			<-gate
+		}
+		return hostnames[ip]
+	}
+
+	chans := pm.restoreDevices()
+	released := make(map[string]bool, len(chans))
+	for i, done := range chans {
+		ip := pm.devices[i].IP
+		// chans is in device order, so this releases exactly the lookup that
+		// `done` belongs to. A repeated IP shares its gate and is already through.
+		if gate, ok := gates[ip]; ok && !released[ip] {
+			released[ip] = true
+			close(gate)
+		}
+		<-done
+	}
+}
+
 // TestConfigPersistence covers the saved device list: that the list is written
-// on every change to it (add, sort, remove), that a second run gets the same
-// devices back in the same order, and that counters and hostnames are *not*
+// on every change to it (add, sort, remove, drag), that a second run gets the
+// same devices back in the same order, and that counters and hostnames are *not*
 // restored — counters belong to one run, and a hostname is re-asked so a device
 // that has changed or gone away isn't shown a remembered name.
 func TestConfigPersistence(t *testing.T) {
@@ -286,17 +323,16 @@ func TestConfigPersistence(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "pms", "config.json")
 
+	// What each device answers when asked for its SNMP hostname: 10.0.0.2 has
+	// one, the others don't (so they end up on "Empty").
+	hostnames := map[string]string{"10.0.0.1": "", "10.0.0.2": "sw-core-02", "10.0.0.3": ""}
+
 	newSession := func() *appState {
 		win := a.NewWindow("PMS")
 		pm := newAppState(win, fyne.NewStaticResource("trash.png", trashPNG))
 		win.SetContent(pm.buildUI(fyne.NewStaticResource("ping-pong.png", pingPongPNG)))
 		pm.configFile = path
-		pm.lookupName = func(ip, iface string) string {
-			if ip == "10.0.0.2" {
-				return "sw-core-02"
-			}
-			return ""
-		}
+		pm.lookupName = func(ip, iface string) string { return hostnames[ip] }
 		return pm
 	}
 
@@ -317,9 +353,7 @@ func TestConfigPersistence(t *testing.T) {
 
 	// Reopening the app: same devices, same order, names kept.
 	second := newSession()
-	for _, done := range second.restoreDevices() {
-		<-done
-	}
+	serialRestore(second, hostnames)
 	wantIPs := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}
 	if len(second.devices) != len(wantIPs) {
 		t.Fatalf("restored %d devices, want %d", len(second.devices), len(wantIPs))
@@ -359,9 +393,7 @@ func TestConfigPersistence(t *testing.T) {
 	// a removal is saved too, so it doesn't come back on the next run
 	second.removeDevice(1)
 	third := newSession()
-	for _, done := range third.restoreDevices() {
-		<-done
-	}
+	serialRestore(third, hostnames)
 	if len(third.devices) != 2 || third.devices[1].IP != "10.0.0.3" {
 		t.Errorf("after remove, restored %v", []string{third.devices[0].IP, third.devices[len(third.devices)-1].IP})
 	}
@@ -370,9 +402,7 @@ func TestConfigPersistence(t *testing.T) {
 	third.dragRow(third.devices[0], third.rowStride())
 	third.endRowDrag()
 	fourth := newSession()
-	for _, done := range fourth.restoreDevices() {
-		<-done
-	}
+	serialRestore(fourth, hostnames)
 	if fourth.devices[0].IP != "10.0.0.3" {
 		t.Errorf("dragged order not saved, first = %q, want 10.0.0.3", fourth.devices[0].IP)
 	}
@@ -447,6 +477,87 @@ func TestConfigFile(t *testing.T) {
 	}
 	if _, err := loadConfig(path); err == nil {
 		t.Errorf("corrupt config file did not report an error")
+	}
+}
+
+// TestHostnameRefreshOnStart covers re-asking every device for its SNMP sysName
+// when a run starts: a device renamed (or replaced, or only now reachable) since
+// it was added shows its current name, the column goes back to the placeholder
+// while the query is out, and an answer from before the refresh is dropped
+// instead of landing on top of the new one.
+func TestHostnameRefreshOnStart(t *testing.T) {
+	a := test.NewApp()
+	defer a.Quit()
+
+	win := a.NewWindow("PMS")
+	pm := newAppState(win, fyne.NewStaticResource("trash.png", trashPNG))
+	win.SetContent(pm.buildUI(fyne.NewStaticResource("ping-pong.png", pingPongPNG)))
+	// No ping cycle is wanted here: the ticker Start kicks off must not reach a
+	// tick and fork ping at real addresses while the test runs.
+	pm.pingInterval = 3600
+
+	pm.lookupName = func(ip, iface string) string { return "sw-core-01" }
+	<-pm.addDevice("10.0.0.1", "Alpha")
+	device := pm.devices[0]
+	if device.Hostname != "sw-core-01" {
+		t.Fatalf("hostname after add = %q, want sw-core-01", device.Hostname)
+	}
+
+	// The device is renamed on the far end; starting a run has to notice.
+	release := make(chan struct{})
+	pm.lookupName = func(ip, iface string) string {
+		<-release
+		return "sw-core-01-renamed"
+	}
+	done := pm.start()
+	if device.Hostname != resolvingHostname {
+		t.Errorf("hostname while re-resolving = %q, want %q", device.Hostname, resolvingHostname)
+	}
+	if got := pm.rowFor(device).hostname.Text; got != resolvingHostname {
+		t.Errorf("row label while re-resolving = %q, want %q", got, resolvingHostname)
+	}
+	close(release)
+	for _, ch := range done {
+		<-ch
+	}
+	if device.Hostname != "sw-core-01-renamed" {
+		t.Errorf("hostname after Start = %q, want sw-core-01-renamed", device.Hostname)
+	}
+	if got := pm.rowFor(device).hostname.Text; got != "sw-core-01-renamed" {
+		t.Errorf("row label after Start = %q, want sw-core-01-renamed", got)
+	}
+	pm.stop()
+
+	// A lookup parked from before a refresh must not overwrite the refresh's
+	// answer when it finally comes back — a Stop/Start while a query is still
+	// out on a dead host.
+	parkedRelease := make(chan struct{})
+	pm.lookupName = func(ip, iface string) string {
+		<-parkedRelease
+		return "" // an unanswered query, which would read "Empty"
+	}
+	parked := pm.refreshHostnames()
+
+	pm.lookupName = func(ip, iface string) string { return "sw-core-02" }
+	for _, ch := range pm.refreshHostnames() {
+		<-ch
+	}
+	if device.Hostname != "sw-core-02" {
+		t.Fatalf("hostname after second refresh = %q, want sw-core-02", device.Hostname)
+	}
+
+	close(parkedRelease)
+	for _, ch := range parked {
+		<-ch
+	}
+	if device.Hostname != "sw-core-02" {
+		t.Errorf("superseded lookup overwrote the hostname with %q", device.Hostname)
+	}
+
+	// A refresh with an empty list is a no-op, not a panic.
+	pm.removeDevice(0)
+	if got := pm.refreshHostnames(); len(got) != 0 {
+		t.Errorf("refresh with no devices started %d lookups", len(got))
 	}
 }
 

@@ -104,6 +104,13 @@ type appState struct {
 	// rather than a direct call so tests can stub it instead of shelling out.
 	lookupName func(ip, iface string) string
 
+	// hostnameGen counts hostname refreshes. Every lookup captures the
+	// generation it was started in and its answer is dropped if a later refresh
+	// has since re-asked the same devices: one lookup can sit on a dead host for
+	// a couple of seconds, so a quick Stop/Start would otherwise let the old
+	// query's "Empty" land on top of the new query's answer.
+	hostnameGen int
+
 	// configFile is the JSON file the device list is saved to and restored from
 	// (see config.go). Empty means no persistence, which is what newAppState
 	// leaves it as: main.go points it at the real config file, so a test that
@@ -376,13 +383,44 @@ func (pm *appState) addDevice(ip, name string) <-chan struct{} {
 func (pm *appState) startHostnameLookup(device *Device) <-chan struct{} {
 	// Everything the goroutine needs is read here, on the UI goroutine.
 	lookup, ip, iface := pm.lookupName, device.IP, pm.interfaceName
+	gen := pm.hostnameGen
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		host := lookup(ip, iface)
-		fyne.Do(func() { pm.applyResolvedHostname(device, host) })
+		fyne.Do(func() {
+			if gen != pm.hostnameGen {
+				return // a later refresh has already re-asked this device
+			}
+			pm.applyResolvedHostname(device, host)
+		})
 	}()
+	return done
+}
+
+// refreshHostnames re-asks every device on the list for its SNMP sysName, just
+// as adding a device does — so starting a monitoring run picks up a switch that
+// has been renamed, replaced or has only now come back on the network, instead
+// of showing whatever the first lookup happened to get. Each column goes back to
+// the "Resolving…" placeholder while its query is out.
+//
+// Bumping the generation first supersedes every lookup still in flight, so the
+// answers to this refresh are the only ones that can land.
+//
+// The returned channels close as each answer arrives; the UI ignores them, tests
+// wait on them.
+func (pm *appState) refreshHostnames() []<-chan struct{} {
+	pm.hostnameGen++
+
+	done := make([]<-chan struct{}, 0, len(pm.devices))
+	for _, device := range pm.devices {
+		device.Hostname = resolvingHostname
+		if row := pm.rowFor(device); row != nil {
+			setLabel(row.hostname, resolvingHostname)
+		}
+		done = append(done, pm.startHostnameLookup(device))
+	}
 	return done
 }
 
@@ -885,13 +923,22 @@ func (pm *appState) toggleStartStop() {
 	}
 }
 
-func (pm *appState) start() {
+// start begins a monitoring run. Every device's hostname is looked up again
+// here: a run is where the list gets compared against reality, so it starts from
+// what the devices say now rather than from an answer that may be hours old.
+// The lookups' completion channels are returned for the same reason addDevice
+// returns one — tests wait on them, the UI ignores them.
+func (pm *appState) start() []<-chan struct{} {
 	pm.running = true
 	pm.toggleBtn.SetText("Stop")
 	pm.toggleBtn.Importance = widget.DangerImportance
 	pm.toggleBtn.Refresh()
 	pm.refreshStatus()
+	// Stop does not do this: stopping is the app going quiet, and firing a round
+	// of SNMP queries on the way out would be the opposite.
+	done := pm.refreshHostnames()
 	pm.startTicker()
+	return done
 }
 
 func (pm *appState) stop() {
