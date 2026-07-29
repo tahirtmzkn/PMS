@@ -68,10 +68,22 @@ func (pm *appState) buildSettingsPanel() *fyne.Container {
 	})
 	pm.ifaceSelect.SetSelected(pm.interfaceName)
 
+	pm.themeSelect = widget.NewSelect(themeModeLabels, func(label string) {
+		pm.applyThemeMode(themeModeFromLabel(label))
+		pm.persistConfig()
+	})
+	// Assigned rather than SetSelected: SetSelected fires OnChanged, and this
+	// runs during buildUI — before the saved device list has been restored — so
+	// the callback's persistConfig would write today's empty list over the
+	// saved one. The mode itself is already applied by then (main.go does it
+	// before building the UI), so there is nothing for the callback to do here.
+	pm.themeSelect.Selected = pm.themeMode.label()
+
 	h := pm.controlHeight
 	return container.NewHBox(
 		widget.NewLabel("Interval (s)"), sized(70, h, intervalEntry),
 		widget.NewLabel("Timeout (ms)"), sized(90, h, timeoutEntry),
 		widget.NewLabel("Interface"), sized(160, h, pm.ifaceSelect),
+		widget.NewLabel("Theme"), sized(110, h, pm.themeSelect),
 	)
 }

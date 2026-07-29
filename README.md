@@ -18,8 +18,10 @@ Features
 - A status line summarising how many devices are up, down, or not yet pinged.
 - Sortable and resizable columns, and rows you can drag into the order you want.
 - Interval, timeout and network interface are set in the window and apply immediately.
-- The device list is saved automatically, so closing the app and reopening it gets the same
-  devices back, in the same order.
+- Light or dark, your choice: **Theme** follows the desktop by default and can be pinned to
+  either, switching the whole window on the spot.
+- The device list and the theme choice are saved automatically, so closing the app and reopening
+  it gets the same devices back, in the same order, and the same look.
 
 
 Requirements
@@ -87,29 +89,35 @@ Settings:
 | Interval (s) | 1 | 1 and up — how long between cycles |
 | Timeout (ms) | 1000 | 100–10000 — how long one ping waits for a reply |
 | Interface | `enp3s0` | the machine's interfaces, listed from the OS |
+| Theme | System | System, Light, Dark |
 
 Out-of-range input is simply not applied, so a half-typed value never takes effect.
 
-The settings themselves live for the session only and start at those defaults on every launch;
-the device list does not — see below.
+**Theme** takes effect immediately and is remembered. `System` follows the desktop's own light/dark
+preference (and `FYNE_THEME=light|dark` if you set it), which is the default; `Light` and `Dark`
+pin the window regardless of what the desktop is doing. Interval, timeout and interface are *not*
+remembered — they start at the defaults above on every launch. The device list is; see below.
 
 
-Saved device list
+Saved configuration
 -----------------------
-The list of devices is written to `~/.config/pms/config.json` and read back at startup, so the
-app reopens with the same devices in the same order. It is saved whenever the list changes —
-adding, removing, sorting or dragging a row — not on exit, so a crash or a `kill` doesn't lose
-it either.
+The device list and the theme choice are written to `~/.config/pms/config.json` and read back at
+startup, so the app reopens with the same devices in the same order and the same look. It is saved
+whenever any of that changes — adding, removing, sorting or dragging a row, or picking a theme —
+not on exit, so a crash or a `kill` doesn't lose it either.
 
 Only what you chose is stored, one entry per device:
 ```json
 {
+  "theme": "dark",
   "devices": [
     { "ip": "10.0.0.1", "name": "Alpha" },
     { "ip": "10.0.0.2", "name": "Unknown" }
   ]
 }
 ```
+
+`theme` is `light` or `dark`, and is left out entirely while the theme follows the desktop.
 
 Counters are not saved — they measure one run, so every launch starts at zero. Hostnames are not
 saved either: each device is asked for its SNMP hostname again on startup, so the column shows
@@ -163,6 +171,6 @@ $ go test ./...                  # headless smoke test
 `smoke_test.go` builds the entire UI against Fyne's headless test app — no window opens — and
 exercises adding/removing devices, sorting, the column-resize drag, the row-reorder drag and
 its animation, loss formatting, the status line, SNMP hostname resolution (with the lookup
-stubbed, so tests never fork `snmpget`) and the saved-device-list round trip (against a temp
-directory, never your real config). It's the intended way to check UI changes, especially to the
-custom widgets, without putting a window on the screen.
+stubbed, so tests never fork `snmpget`), the light/dark theme choice and the saved-config round
+trip (against a temp directory, never your real config). It's the intended way to check UI changes,
+especially to the custom widgets, without putting a window on the screen.

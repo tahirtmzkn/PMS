@@ -11,10 +11,13 @@ import (
 	"fyne.io/fyne/v2"
 )
 
-// savedConfig is the on-disk form of the app's configuration. Only the device
-// list is in it: the counters are a measurement of one run, not configuration,
-// so they deliberately start at zero on every launch.
+// savedConfig is the on-disk form of the app's configuration: the device list
+// and the light/dark choice. The counters are not in it — they are a measurement
+// of one run, not configuration, so they start at zero on every launch. Nor are
+// interval/timeout/interface, which stay session-only.
 type savedConfig struct {
+	// Theme is "light" or "dark", and absent when following the desktop.
+	Theme   string        `json:"theme,omitempty"`
 	Devices []savedDevice `json:"devices"`
 }
 
@@ -92,57 +95,64 @@ func saveConfig(path string, cfg savedConfig) error {
 	return os.Rename(tmp.Name(), path)
 }
 
-// persistDevices writes the current device list out. Called after every change
-// to the list itself — add, remove, sort, drag — rather than only on exit, so
-// the list survives a crash or a kill as well as a clean close, and so no
+// persistConfig writes the current configuration out. Called after every change
+// to it — add, remove, sort, drag, and picking a theme — rather than only on
+// exit, so it survives a crash or a kill as well as a clean close, and so no
 // window-close hook has to be relied on.
 //
 // A failed write is logged rather than raised: the app is perfectly usable
 // without a config file, and a dialog interrupting every Add would be a worse
 // outcome than a list that isn't saved.
-func (pm *appState) persistDevices() {
+func (pm *appState) persistConfig() {
 	if pm.configFile == "" {
 		return // persistence disabled (no config dir, or a test)
 	}
 
-	cfg := savedConfig{Devices: make([]savedDevice, len(pm.devices))}
+	cfg := savedConfig{
+		Theme:   pm.themeMode.configValue(),
+		Devices: make([]savedDevice, len(pm.devices)),
+	}
 	for i, d := range pm.devices {
 		cfg.Devices[i] = savedDevice{IP: d.IP, Name: d.Name}
 	}
 	if err := saveConfig(pm.configFile, cfg); err != nil {
-		fyne.LogError("could not save the device list to "+pm.configFile, err)
+		fyne.LogError("could not save the configuration to "+pm.configFile, err)
 	}
 }
 
-// restoreDevices puts the saved list back in the table, in the saved order, and
+// loadSavedConfig reads the config file once, for main.go to apply in two parts:
+// the theme before the window content is built, so the first paint is already in
+// the right palette, and the device list after it. An unreadable file is logged
+// and comes back empty — and, importantly, is left on disk rather than
+// overwritten, so the next change to the list is what replaces it.
+func (pm *appState) loadSavedConfig() savedConfig {
+	if pm.configFile == "" {
+		return savedConfig{}
+	}
+
+	cfg, err := loadConfig(pm.configFile)
+	if err != nil {
+		fyne.LogError("could not read the saved configuration from "+pm.configFile, err)
+		return savedConfig{}
+	}
+	return cfg
+}
+
+// restoreDevices puts a saved list back in the table, in the saved order, and
 // starts a hostname lookup for each device exactly as if it had just been added
 // — so the Hostname column shows what the device says now, and a device that has
 // gone away reads "Empty" rather than showing a remembered name.
 //
 // The returned channels close as each lookup's result lands; the app ignores
-// them, tests wait on them. Call it after the window content is built, so the
-// rows the lookups write into exist.
-func (pm *appState) restoreDevices() []<-chan struct{} {
-	if pm.configFile == "" {
-		return nil
-	}
-
-	cfg, err := loadConfig(pm.configFile)
-	if err != nil {
-		// A corrupt or unreadable file is left alone rather than overwritten:
-		// the next change to the list will replace it, and until then the user
-		// still has whatever is in there to look at.
-		fyne.LogError("could not read the saved device list from "+pm.configFile, err)
-		return nil
-	}
-
-	restored := make([]*Device, 0, len(cfg.Devices))
-	for _, saved := range cfg.Devices {
-		ip := strings.TrimSpace(saved.IP)
+// them, tests wait on them.
+func (pm *appState) restoreDevices(saved []savedDevice) []<-chan struct{} {
+	restored := make([]*Device, 0, len(saved))
+	for _, entry := range saved {
+		ip := strings.TrimSpace(entry.IP)
 		if ip == "" {
 			continue // hand-edited file, or a device saved before this field existed
 		}
-		name := strings.TrimSpace(saved.Name)
+		name := strings.TrimSpace(entry.Name)
 		if name == "" {
 			name = unknownName
 		}

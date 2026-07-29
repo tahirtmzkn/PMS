@@ -83,6 +83,10 @@ type appState struct {
 	pingTimeout   int // ms
 	interfaceName string
 
+	// themeMode is the light/dark choice; themeSystem (the default) follows the
+	// desktop. Applied through applyThemeMode, saved in the config file.
+	themeMode themeMode
+
 	running    bool
 	isPinging  bool
 	tickerStop chan struct{}
@@ -132,6 +136,7 @@ type appState struct {
 	toggleBtn      *widget.Button
 	statusLabel    *widget.Label
 	ifaceSelect    *widget.Select
+	themeSelect    *widget.Select
 	nameHeaderBtn  *widget.Button
 	hostHeaderBtn  *widget.Button
 	ipHeaderBtn    *widget.Button
@@ -301,6 +306,21 @@ func (pm *appState) buildUI(pingPongIcon fyne.Resource) fyne.CanvasObject {
 	return container.NewBorder(top, statusBar, nil, nil, scroll)
 }
 
+// applyThemeMode pins (or unpins) the light/dark variant and repaints in it.
+// Handing Fyne a fresh theme value is what makes the switch visible: its
+// settings change clears the theme caches and re-resolves every widget's colors.
+//
+// The table needs the extra refreshRows because a row's background is a computed
+// color held in a canvas.Rectangle (the success/error tint at low alpha, and the
+// window background composited under a lifted row), not a color Fyne re-resolves
+// on its own — without it the rows keep the old palette's tint until the next
+// ping cycle happens to change one.
+func (pm *appState) applyThemeMode(mode themeMode) {
+	pm.themeMode = mode
+	fyne.CurrentApp().Settings().SetTheme(newAppTheme(mode))
+	pm.refreshRows()
+}
+
 // refreshStatus rewrites the bottom status line. "pending" covers devices
 // added (or just cleared) that this cycle hasn't reached yet, so they aren't
 // misreported as down before their first ping.
@@ -371,7 +391,7 @@ func (pm *appState) addDevice(ip, name string) <-chan struct{} {
 	device := &Device{IP: ip, Name: name, Hostname: resolvingHostname}
 	pm.devices = append(pm.devices, device)
 	pm.refreshRows()
-	pm.persistDevices()
+	pm.persistConfig()
 
 	return pm.startHostnameLookup(device)
 }
@@ -445,7 +465,7 @@ func (pm *appState) removeDevice(idx int) {
 	}
 	pm.devices = append(pm.devices[:idx], pm.devices[idx+1:]...)
 	pm.refreshRows()
-	pm.persistDevices()
+	pm.persistConfig()
 }
 
 func (pm *appState) clearStats() {
@@ -676,7 +696,7 @@ func (pm *appState) endRowDrag() {
 	}
 	// Saved here rather than in swapRows, so one drag across the table is one
 	// write instead of one per row it passed.
-	pm.persistDevices()
+	pm.persistConfig()
 }
 
 // liftRow picks a row up: opaque background, thin outline, painted last.
@@ -881,7 +901,7 @@ func (pm *appState) sortBy(col sortColumn) {
 	pm.refreshRows()
 	// The saved list is an ordered one, and a sort is what the user now wants
 	// that order to be.
-	pm.persistDevices()
+	pm.persistConfig()
 }
 
 func (pm *appState) refreshHeaderLabels() {

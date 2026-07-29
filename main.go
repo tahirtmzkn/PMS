@@ -21,7 +21,6 @@ func main() {
 	})
 
 	a := app.New()
-	a.Settings().SetTheme(newAppTheme())
 	pingPongIcon := fyne.NewStaticResource("ping-pong.png", pingPongPNG)
 	trashIcon := fyne.NewStaticResource("trash.png", trashPNG)
 	a.SetIcon(pingPongIcon)
@@ -30,18 +29,26 @@ func main() {
 
 	pm := newAppState(win, trashIcon)
 	if path, err := defaultConfigPath(); err != nil {
-		// No usable config directory: the app still runs, the list just won't
-		// outlive it.
-		fyne.LogError("no config directory, the device list will not be saved", err)
+		// No usable config directory: the app still runs, the list and the theme
+		// choice just won't outlive it.
+		fyne.LogError("no config directory, the configuration will not be saved", err)
 	} else {
 		pm.configFile = path
 	}
 
+	// One read of the config file, applied in two parts. The theme goes on
+	// first, before any widget is built, so the very first paint is already in
+	// the chosen palette — and it installs the app's theme (the custom
+	// green/yellow) whether or not a choice was saved.
+	saved := pm.loadSavedConfig()
+	pm.applyThemeMode(themeModeFromConfig(saved.Theme))
+
 	win.SetContent(pm.buildUI(pingPongIcon))
-	// The saved list goes in after the content is built, so the rows the
-	// hostname lookups write into exist. Those lookups call fyne.Do before the
-	// event loop is up, which is fine — the driver queues them until it starts.
-	pm.restoreDevices()
+	// The saved list goes in after the content is built, so the settings row's
+	// theme Select is already in place and the status label exists. The hostname
+	// lookups it starts call fyne.Do before the event loop is up, which is fine
+	// — the driver queues them until it starts.
+	pm.restoreDevices(saved.Devices)
 	win.Resize(fyne.NewSize(1200, 700))
 	win.ShowAndRun()
 }

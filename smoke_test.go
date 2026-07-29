@@ -9,6 +9,7 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/test"
+	"fyne.io/fyne/v2/theme"
 )
 
 func TestSmokeBuildUI(t *testing.T) {
@@ -298,7 +299,7 @@ func serialRestore(pm *appState, hostnames map[string]string) {
 		return hostnames[ip]
 	}
 
-	chans := pm.restoreDevices()
+	chans := pm.restoreDevices(pm.loadSavedConfig().Devices)
 	released := make(map[string]bool, len(chans))
 	for i, done := range chans {
 		ip := pm.devices[i].IP
@@ -338,7 +339,7 @@ func TestConfigPersistence(t *testing.T) {
 
 	// A run with no config file yet is a first run, not an error.
 	first := newSession()
-	if got := first.restoreDevices(); got != nil {
+	if got := first.restoreDevices(first.loadSavedConfig().Devices); got != nil {
 		t.Errorf("restore with no config file returned %d lookups, want none", len(got))
 	}
 	if len(first.devices) != 0 {
@@ -412,7 +413,7 @@ func TestConfigPersistence(t *testing.T) {
 	off := newSession()
 	off.configFile = ""
 	<-off.addDevice("10.9.9.9", "Nowhere")
-	if got := off.restoreDevices(); got != nil {
+	if got := off.restoreDevices(off.loadSavedConfig().Devices); got != nil {
 		t.Errorf("restore with persistence off returned %d lookups", len(got))
 	}
 	saved, err := loadConfig(path)
@@ -423,6 +424,147 @@ func TestConfigPersistence(t *testing.T) {
 		if d.IP == "10.9.9.9" {
 			t.Errorf("device was written despite persistence being off")
 		}
+	}
+}
+
+// TestThemeMode covers the light/dark choice: that a pinned mode overrides the
+// variant Fyne resolves from the desktop (which is the whole mechanism), that
+// "System" passes that variant through, that the app's own green/yellow survive
+// both palettes, and the label/config-value round trips.
+func TestThemeMode(t *testing.T) {
+	dflt := theme.DefaultTheme()
+
+	// The variant Fyne hands in is deliberately the *opposite* of the pinned one
+	// in each case, so a mode that was ignored would show up as a failure.
+	dark := newAppTheme(themeDark)
+	if got, want := dark.Color(theme.ColorNameBackground, theme.VariantLight), dflt.Color(theme.ColorNameBackground, theme.VariantDark); got != want {
+		t.Errorf("dark background = %v, want %v", got, want)
+	}
+	light := newAppTheme(themeLight)
+	if got, want := light.Color(theme.ColorNameBackground, theme.VariantDark), dflt.Color(theme.ColorNameBackground, theme.VariantLight); got != want {
+		t.Errorf("light background = %v, want %v", got, want)
+	}
+	// The two palettes have to actually differ, or the assertions above would
+	// hold for a theme that ignored the mode entirely.
+	if dark.Color(theme.ColorNameBackground, theme.VariantLight) == light.Color(theme.ColorNameBackground, theme.VariantLight) {
+		t.Errorf("dark and light backgrounds are identical")
+	}
+
+	system := newAppTheme(themeSystem)
+	for _, variant := range []fyne.ThemeVariant{theme.VariantLight, theme.VariantDark} {
+		if got, want := system.Color(theme.ColorNameBackground, variant), dflt.Color(theme.ColorNameBackground, variant); got != want {
+			t.Errorf("system background for variant %d = %v, want %v", variant, got, want)
+		}
+	}
+
+	// Success/warning are the app's own and must not change with the palette:
+	// green means "up" in either.
+	for _, name := range []fyne.ThemeColorName{theme.ColorNameSuccess, theme.ColorNameWarning} {
+		if dark.Color(name, theme.VariantDark) != light.Color(name, theme.VariantLight) {
+			t.Errorf("%s differs between light and dark", name)
+		}
+	}
+
+	// Labels shown in the settings row, and the values written to the file.
+	for _, mode := range []themeMode{themeSystem, themeLight, themeDark} {
+		if got := themeModeFromLabel(mode.label()); got != mode {
+			t.Errorf("label round trip for mode %d = %d", mode, got)
+		}
+		if got := themeModeFromConfig(mode.configValue()); got != mode {
+			t.Errorf("config round trip for mode %d = %d", mode, got)
+		}
+	}
+	if got := themeSystem.configValue(); got != "" {
+		t.Errorf("system config value = %q, want empty so the field is omitted", got)
+	}
+	// Hand-edited files: an explicit "system", odd casing, junk, or nothing at
+	// all all mean follow the desktop.
+	for _, value := range []string{"", "system", "SYSTEM", " Dark ", "purple"} {
+		want := themeSystem
+		if strings.TrimSpace(strings.ToLower(value)) == "dark" {
+			want = themeDark
+		}
+		if got := themeModeFromConfig(value); got != want {
+			t.Errorf("themeModeFromConfig(%q) = %d, want %d", value, got, want)
+		}
+	}
+}
+
+// TestThemeSelection covers the settings row's Theme control end to end: the
+// saved choice is what the app starts in and what the Select shows, picking a
+// different one applies and saves it, and — the trap this guards — building the
+// UI must not write the config file, because at that moment the saved device
+// list has not been restored yet and would be replaced by an empty one.
+func TestThemeSelection(t *testing.T) {
+	a := test.NewApp()
+	defer a.Quit()
+
+	path := filepath.Join(t.TempDir(), "pms", "config.json")
+	if err := saveConfig(path, savedConfig{
+		Theme:   "dark",
+		Devices: []savedDevice{{IP: "10.0.0.1", Name: "Alpha"}, {IP: "10.0.0.2", Name: "Beta"}},
+	}); err != nil {
+		t.Fatalf("saveConfig: %v", err)
+	}
+
+	// main.go's order: read the file, apply the theme, then build the UI.
+	win := a.NewWindow("PMS")
+	pm := newAppState(win, fyne.NewStaticResource("trash.png", trashPNG))
+	pm.configFile = path
+	pm.lookupName = func(ip, iface string) string { return "" }
+
+	saved := pm.loadSavedConfig()
+	pm.applyThemeMode(themeModeFromConfig(saved.Theme))
+	if pm.themeMode != themeDark {
+		t.Fatalf("restored theme = %d, want dark", pm.themeMode)
+	}
+	win.SetContent(pm.buildUI(fyne.NewStaticResource("ping-pong.png", pingPongPNG)))
+
+	if got := pm.themeSelect.Selected; got != "Dark" {
+		t.Errorf("theme select shows %q, want Dark", got)
+	}
+	// Building the UI must not have touched the file: the device list is still
+	// only on disk at this point.
+	if onDisk := pm.loadSavedConfig(); len(onDisk.Devices) != 2 {
+		t.Fatalf("building the UI overwrote the saved list: %d devices left", len(onDisk.Devices))
+	}
+
+	// One answer at a time, for the reason serialRestore documents.
+	serialRestore(pm, map[string]string{"10.0.0.1": "", "10.0.0.2": ""})
+
+	// Picking a mode applies it to the running app and saves it.
+	pm.themeSelect.OnChanged("Light")
+	if pm.themeMode != themeLight {
+		t.Errorf("after picking Light, mode = %d", pm.themeMode)
+	}
+	if got, want := fyne.CurrentApp().Settings().Theme().Color(theme.ColorNameBackground, theme.VariantDark),
+		theme.DefaultTheme().Color(theme.ColorNameBackground, theme.VariantLight); got != want {
+		t.Errorf("app theme background = %v, want the light palette's %v", got, want)
+	}
+	onDisk := pm.loadSavedConfig()
+	if onDisk.Theme != "light" {
+		t.Errorf("saved theme = %q, want light", onDisk.Theme)
+	}
+	if len(onDisk.Devices) != 2 {
+		t.Errorf("saving the theme lost the device list: %d devices", len(onDisk.Devices))
+	}
+	// The rows survive the repaint applyThemeMode does.
+	if len(pm.rows) != 2 || pm.rows[0].device != pm.devices[0] {
+		t.Errorf("rows are not in step with devices after a theme change")
+	}
+
+	// Back to following the desktop: the field goes away rather than being
+	// written as "system".
+	pm.themeSelect.OnChanged("System")
+	if got := pm.loadSavedConfig().Theme; got != "" {
+		t.Errorf("saved theme after System = %q, want empty", got)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if strings.Contains(string(data), "theme") {
+		t.Errorf("config file still mentions a theme:\n%s", data)
 	}
 }
 

@@ -156,28 +156,37 @@ sudo apt install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
   lookup picks the source, which it does correctly.
   The community/version are constants, not settings fields — a wrong one just yields "Unknown".
   `appState.lookupName` holds this function so tests can stub it instead of forking a subprocess.
-- `config.go` — saves and restores the device list as JSON at
+- `config.go` — saves and restores the device list and the light/dark choice as JSON at
   `os.UserConfigDir()/pms/config.json`. Deliberate choices: only `{ip, name}` per device is
   stored — counters measure one run, and `Hostname` is re-asked over SNMP on load (a remembered
   sysName would go stale silently, and `restoreDevices` starts the same lookup `addDevice` does,
-  so a restored row shows `Resolving…` then the live answer or `Empty`); saving happens at the
-  four places the *list* changes (`addDevice`, `removeDevice`, `sortBy`, `endRowDrag`) rather
+  so a restored row shows `Resolving…` then the live answer or `Empty`); `theme` is `"light"`/
+  `"dark"` and **absent** when following the desktop, so the default writes nothing;
+  interval/timeout/interface stay session-only. Saving happens at the places the saved state
+  changes (`addDevice`, `removeDevice`, `sortBy`, `endRowDrag`, and the theme Select) rather
   than in a window-close hook, so a crash or `kill` doesn't lose it — `endRowDrag` rather than
   `swapRows` so one drag across the table is one write; `saveConfig` writes a temp file in the
   same directory and renames it over the target, so an interrupted save can't replace a good
   list with a truncated one; a missing file is a first run (not an error) while a corrupt one is
   logged and left alone rather than overwritten. `appState.configFile` holds the path and is
   **empty by default** — `main.go` fills it in from `defaultConfigPath()`, which is what keeps
-  every test that doesn't opt in from writing over the user's real device list. `restoreDevices`
-  is called from `main.go` *after* `SetContent` (the lookups need rows to write into) and
-  returns the lookups' completion channels for tests; its `fyne.Do` callbacks landing before
-  `ShowAndRun` is safe, the glfw driver queues them on an unbounded channel until the loop
-  starts.
+  every test that doesn't opt in from writing over the user's real device list.
+  The file is read **once**, by `loadSavedConfig`, and applied in two parts because they need
+  opposite sides of `buildUI`: the theme before it (first paint in the right palette) and
+  `restoreDevices(saved.Devices)` after it (the lookups need rows, and the settings row's Select
+  has to exist). `restoreDevices` takes the list rather than re-reading the file, and returns the
+  lookups' completion channels for tests; its `fyne.Do` callbacks landing before `ShowAndRun` is
+  safe, the glfw driver queues them on an unbounded channel until the loop starts.
 - `settings.go` — an always-visible settings row under the toolbar (no button to show/hide it):
   validated `widget.Entry` fields for interval/timeout apply on every valid `OnChanged`; interface
   is a `widget.Select` populated once from `net.Interfaces()` rather than free text. Changing the
   interval or interface while running calls `startTicker()` again so it takes effect on the next
-  cycle instead of requiring a manual Stop/Start.
+  cycle instead of requiring a manual Stop/Start. The Theme `Select` (System/Light/Dark) calls
+  `applyThemeMode` + `persistConfig`, and sets its initial value by **assigning `Selected`, not
+  `SetSelected`** — this is load-bearing: `SetSelected` fires `OnChanged`, and `buildUI` runs before
+  the saved device list has been restored, so the callback's `persistConfig` would write an empty
+  list over the saved one. There is nothing for it to apply anyway, `main.go` having already
+  applied the mode.
 - `resizer.go` — small custom widgets/layouts for the table: `themedRect` (a rectangle whose fill
   is resolved from the live theme *at render time* — `buildUI` runs before the theme variant has
   settled, so `canvas.NewRectangle(theme.Color(...))` there silently picks dark-variant colors and
@@ -193,14 +202,31 @@ sudo apt install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
   `Objects` order (which frees `Objects` to carry paint order, so the dragged row can be painted
   last) and adds each row's `rowOffsets` entry to its Y. Its `MinSize` ignores those offsets, so a
   row leaning out of its slot never resizes the scroll content.
-- `theme.go` — `appTheme` wraps `theme.DefaultTheme()` and overrides just `ColorNameSuccess`
-  (a darker green than Fyne's default) and `ColorNameWarning` (a true yellow instead of Fyne's
-  default orange), applied once via `a.Settings().SetTheme(...)` in `main.go`. Because
-  `theme.SuccessColor()`/`ErrorColor()`/`widget.Importance` all resolve through the app's current
-  theme, this one override is what keeps the Start button, Clear button, and the row
-  success/fail tint (`tinted()` in ui.go) all pulling from the same palette.
-- `main.go` — embeds `assets/*.png` via `//go:embed`, sets app metadata and the custom theme,
-  builds the window.
+- `theme.go` — `appTheme` wraps `theme.DefaultTheme()` and does two things. It overrides
+  `ColorNameSuccess` (a darker green than Fyne's default) and `ColorNameWarning` (a true yellow
+  instead of Fyne's default orange) — the same values in both variants on purpose, since green
+  means "up" either way. Because `theme.SuccessColor()`/`ErrorColor()`/`widget.Importance` all
+  resolve through the app's current theme, that one override is what keeps the Start button, Clear
+  button and the row success/fail tint (`tinted()` in ui.go) pulling from the same palette.
+  It also carries a `themeMode` (`themeSystem`/`themeLight`/`themeDark`) and **substitutes the
+  variant** in `Color`. That substitution *is* dark mode: `theme.DefaultTheme()` picks its light or
+  dark palette purely from the variant argument it is handed (`theme/theme.go`'s
+  `builtinTheme.Color`), so replacing it flips every color in the app, and there is nothing else to
+  override. `themeSystem` passes the variant through, which is what keeps the desktop preference —
+  and `FYNE_THEME` / Fyne's own settings file — working as before.
+  `appState.applyThemeMode` installs the choice with `Settings().SetTheme(newAppTheme(mode))`: a
+  *fresh* theme value, because Fyne's settings change is what clears the theme caches and walks
+  every window refreshing widgets (`internal/app.ApplyThemeTo`), which is how `themedRect`
+  re-resolves. It then calls `refreshRows` on top, because a row's background is a *computed* color
+  sitting in a `canvas.Rectangle` (the low-alpha success/error tint, and the window background
+  composited under a lifted row) — Fyne re-resolves theme colors, not ours, so without the rebuild
+  the rows keep the old palette's tint until some later cycle happens to change one.
+  `main.go` applies the saved mode *before* `buildUI`, so the first paint is already in the right
+  palette rather than flipping after the window appears.
+- `main.go` — embeds `assets/*.png` via `//go:embed`, sets app metadata, then runs one fixed
+  order that the rest of the app depends on: point `configFile` at `defaultConfigPath()`, read the
+  file once (`loadSavedConfig`), `applyThemeMode` — which also installs the custom theme, saved
+  choice or not — then `buildUI`/`SetContent`, then `restoreDevices`, then `ShowAndRun`.
 - `packaging/` — `pms.desktop` + `build-deb.sh`, which hand-rolls a `DEBIAN/control` +
   `usr/bin`/`usr/share/...` tree and calls `dpkg-deb --build` (no extra packaging tool required;
   `fyne package` only produces a `.tar.gz` on Linux, not a `.deb`).
