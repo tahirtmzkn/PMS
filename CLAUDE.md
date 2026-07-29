@@ -18,7 +18,7 @@ go build -o build/pms .        # build
 ./build/pms                    # run
 go vet ./...                   # static check
 go test ./...                  # headless smoke test
-./packaging/build-deb.sh 1.0.0 # build dist/pms_1.0.0_amd64.deb
+./packaging/build-deb.sh 1.0.1 # build dist/pms_1.0.1_amd64.deb
 ```
 
 **Do not drive the running app with synthetic clicks/keystrokes to test it.** This repo lives on

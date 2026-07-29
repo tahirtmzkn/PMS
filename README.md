@@ -55,8 +55,8 @@ $ ./build/pms
 Install as a .deb (Ubuntu)
 -----------------------
 ```
-$ ./packaging/build-deb.sh 1.0.0
-$ sudo apt install ./dist/pms_1.0.0_amd64.deb
+$ ./packaging/build-deb.sh 1.0.1
+$ sudo apt install ./dist/pms_1.0.1_amd64.deb
 ```
 
 This installs the `pms` binary, a desktop entry and an icon, so it launches from the
