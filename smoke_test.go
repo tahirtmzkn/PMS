@@ -16,7 +16,7 @@ func TestSmokeBuildUI(t *testing.T) {
 	a := test.NewApp()
 	defer a.Quit()
 
-	win := a.NewWindow("PMS")
+	win := a.NewWindow(appDisplayName)
 	pm := newAppState(win, fyne.NewStaticResource("trash.png", trashPNG))
 	content := pm.buildUI(fyne.NewStaticResource("ping-pong.png", pingPongPNG))
 	win.SetContent(content)
@@ -105,7 +105,7 @@ func TestRowReorder(t *testing.T) {
 	a := test.NewApp()
 	defer a.Quit()
 
-	win := a.NewWindow("PMS")
+	win := a.NewWindow(appDisplayName)
 	pm := newAppState(win, fyne.NewStaticResource("trash.png", trashPNG))
 	win.SetContent(pm.buildUI(fyne.NewStaticResource("ping-pong.png", pingPongPNG)))
 	win.Resize(fyne.NewSize(1200, 700))
@@ -220,7 +220,7 @@ func TestHostnameLookup(t *testing.T) {
 	a := test.NewApp()
 	defer a.Quit()
 
-	win := a.NewWindow("PMS")
+	win := a.NewWindow(appDisplayName)
 	pm := newAppState(win, fyne.NewStaticResource("trash.png", trashPNG))
 	win.SetContent(pm.buildUI(fyne.NewStaticResource("ping-pong.png", pingPongPNG)))
 
@@ -322,14 +322,14 @@ func TestConfigPersistence(t *testing.T) {
 	a := test.NewApp()
 	defer a.Quit()
 
-	path := filepath.Join(t.TempDir(), "pms", "config.json")
+	path := filepath.Join(t.TempDir(), configDirName, "config.json")
 
 	// What each device answers when asked for its SNMP hostname: 10.0.0.2 has
 	// one, the others don't (so they end up on "Empty").
 	hostnames := map[string]string{"10.0.0.1": "", "10.0.0.2": "sw-core-02", "10.0.0.3": ""}
 
 	newSession := func() *appState {
-		win := a.NewWindow("PMS")
+		win := a.NewWindow(appDisplayName)
 		pm := newAppState(win, fyne.NewStaticResource("trash.png", trashPNG))
 		win.SetContent(pm.buildUI(fyne.NewStaticResource("ping-pong.png", pingPongPNG)))
 		pm.configFile = path
@@ -499,7 +499,7 @@ func TestThemeSelection(t *testing.T) {
 	a := test.NewApp()
 	defer a.Quit()
 
-	path := filepath.Join(t.TempDir(), "pms", "config.json")
+	path := filepath.Join(t.TempDir(), configDirName, "config.json")
 	if err := saveConfig(path, savedConfig{
 		Theme:   "dark",
 		Devices: []savedDevice{{IP: "10.0.0.1", Name: "Alpha"}, {IP: "10.0.0.2", Name: "Beta"}},
@@ -508,7 +508,7 @@ func TestThemeSelection(t *testing.T) {
 	}
 
 	// main.go's order: read the file, apply the theme, then build the UI.
-	win := a.NewWindow("PMS")
+	win := a.NewWindow(appDisplayName)
 	pm := newAppState(win, fyne.NewStaticResource("trash.png", trashPNG))
 	pm.configFile = path
 	pm.lookupName = func(ip, iface string) string { return "" }
@@ -622,6 +622,81 @@ func TestConfigFile(t *testing.T) {
 	}
 }
 
+// TestLegacyConfigMigration covers carrying a device list across the rename from
+// "PMS" to PingInfoManager, which moved the config directory. The case that
+// matters most is the third one: the migration keys on the new file not
+// existing, never on it being empty, so a user who deliberately removed every
+// device does not get the old list back on the next launch.
+func TestLegacyConfigMigration(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, legacyConfigDirName, configFileName)
+	path := filepath.Join(dir, configDirName, configFileName)
+
+	// Nothing anywhere: a genuine first run, and not an error.
+	if err := migrateLegacyConfig(path, legacy); err != nil {
+		t.Fatalf("migrate with no files at all: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("migration invented a config file where there was nothing to carry over")
+	}
+
+	// An old list and no new one: it comes forward, order intact, and the old
+	// file stays where it was.
+	old := savedConfig{
+		Theme:   "dark",
+		Devices: []savedDevice{{IP: "10.0.0.3", Name: "Gamma"}, {IP: "10.0.0.1", Name: "Alpha"}},
+	}
+	if err := saveConfig(legacy, old); err != nil {
+		t.Fatalf("saveConfig(legacy): %v", err)
+	}
+	if err := migrateLegacyConfig(path, legacy); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	got, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("loadConfig(new): %v", err)
+	}
+	if len(got.Devices) != 2 || got.Devices[0].IP != "10.0.0.3" || got.Devices[1].IP != "10.0.0.1" {
+		t.Errorf("migrated devices = %+v, want Gamma then Alpha", got.Devices)
+	}
+	if got.Theme != "dark" {
+		t.Errorf("migrated theme = %q, want dark", got.Theme)
+	}
+	if _, err := os.Stat(legacy); err != nil {
+		t.Errorf("migration removed the old config file: %v", err)
+	}
+
+	// An emptied list under the new name must survive: the old file is still on
+	// disk and must not be read again.
+	if err := saveConfig(path, savedConfig{Devices: []savedDevice{}}); err != nil {
+		t.Fatalf("saveConfig(emptied): %v", err)
+	}
+	if err := migrateLegacyConfig(path, legacy); err != nil {
+		t.Fatalf("migrate over an emptied list: %v", err)
+	}
+	if got, err := loadConfig(path); err != nil || len(got.Devices) != 0 {
+		t.Errorf("migration resurrected %d removed devices (%v)", len(got.Devices), err)
+	}
+
+	// A corrupt old file is reported rather than carried over, and leaves the
+	// new name with no config at all — a first run, which is recoverable.
+	dir2 := t.TempDir()
+	legacy2 := filepath.Join(dir2, legacyConfigDirName, configFileName)
+	path2 := filepath.Join(dir2, configDirName, configFileName)
+	if err := os.MkdirAll(filepath.Dir(legacy2), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(legacy2, []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := migrateLegacyConfig(path2, legacy2); err == nil {
+		t.Errorf("corrupt legacy config migrated without an error")
+	}
+	if _, err := os.Stat(path2); !os.IsNotExist(err) {
+		t.Errorf("failed migration left a config file behind")
+	}
+}
+
 // TestHostnameRefreshOnStart covers re-asking every device for its SNMP sysName
 // when a run starts: a device renamed (or replaced, or only now reachable) since
 // it was added shows its current name, the column goes back to the placeholder
@@ -631,7 +706,7 @@ func TestHostnameRefreshOnStart(t *testing.T) {
 	a := test.NewApp()
 	defer a.Quit()
 
-	win := a.NewWindow("PMS")
+	win := a.NewWindow(appDisplayName)
 	pm := newAppState(win, fyne.NewStaticResource("trash.png", trashPNG))
 	win.SetContent(pm.buildUI(fyne.NewStaticResource("ping-pong.png", pingPongPNG)))
 	// No ping cycle is wanted here: the ticker Start kicks off must not reach a
@@ -768,7 +843,7 @@ func TestStatusLine(t *testing.T) {
 	a := test.NewApp()
 	defer a.Quit()
 
-	win := a.NewWindow("PMS")
+	win := a.NewWindow(appDisplayName)
 	pm := newAppState(win, fyne.NewStaticResource("trash.png", trashPNG))
 	win.SetContent(pm.buildUI(fyne.NewStaticResource("ping-pong.png", pingPongPNG)))
 

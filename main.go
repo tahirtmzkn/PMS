@@ -7,6 +7,14 @@ import (
 	"fyne.io/fyne/v2/app"
 )
 
+// appDisplayName is the name the user sees: the window title and the desktop
+// entry. It is deliberately not the same string as the Debian package or the
+// binary (both "pinginfomanager", lowercase because Debian requires it) or the
+// config directory. The app was called "PMS" until the rename; that name
+// collided with an unrelated package already in the Ubuntu archive, so nothing
+// user-visible or installable carries it any more.
+const appDisplayName = "PingInfoManager"
+
 //go:embed assets/ping-pong.png
 var pingPongPNG []byte
 
@@ -15,8 +23,8 @@ var trashPNG []byte
 
 func main() {
 	app.SetMetadata(fyne.AppMetadata{
-		ID:         "dev.tahir.pms",
-		Name:       "PMS",
+		ID:         "dev.tahir.pinginfomanager",
+		Name:       "PingInfoManager",
 		Migrations: map[string]bool{"fyneDo": true},
 	})
 
@@ -25,7 +33,7 @@ func main() {
 	trashIcon := fyne.NewStaticResource("trash.png", trashPNG)
 	a.SetIcon(pingPongIcon)
 
-	win := a.NewWindow("PMS")
+	win := a.NewWindow(appDisplayName)
 
 	pm := newAppState(win, trashIcon)
 	if path, err := defaultConfigPath(); err != nil {
@@ -34,6 +42,14 @@ func main() {
 		fyne.LogError("no config directory, the configuration will not be saved", err)
 	} else {
 		pm.configFile = path
+		// Before the first read, and only ever when the new file is absent: the
+		// rename moved the config directory, and without this the saved device
+		// list would look like a first run to the renamed app.
+		if legacy, lerr := legacyConfigPath(); lerr == nil {
+			if err := migrateLegacyConfig(path, legacy); err != nil {
+				fyne.LogError("could not carry the configuration over from "+legacy, err)
+			}
+		}
 	}
 
 	// One read of the config file, applied in two parts. The theme goes on

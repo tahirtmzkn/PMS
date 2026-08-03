@@ -4,22 +4,36 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-PMS (Ping Monitoring System) is a small Go desktop app, built with the Fyne GUI toolkit
+PingInfoManager is a small Go desktop app, built with the Fyne GUI toolkit
 (`fyne.io/fyne/v2`), that continuously pings a user-defined list of IP addresses/devices and
 displays live success/fail/total counters in a table, color-coded green (last ping succeeded)
 or red (last ping failed). It's a from-scratch rewrite of an earlier PyQt5/Python version
 (see git history) — the goals were a nicer default UI and a single installable binary instead
 of a Python venv.
 
+The app was called **PMS** (Ping Monitoring System) through 1.0.1. It was renamed because `pms`
+is an existing, unrelated package in the Ubuntu archive, so every installable and on-disk name
+collided with it. Three names are now distinct on purpose and should not be conflated:
+`PingInfoManager` (the display name, `appDisplayName` in `main.go` — window title and desktop
+entry), `pinginfomanager` (Go module, Debian package, binary, and the `~/.config` directory —
+lowercase because Debian requires it), and `pms`, which now appears **only** in the two places
+that must still recognise the old world: `legacyConfigDirName` in `config.go` and the upgrade
+notes in `README.md`.
+
 ## Commands
 
 ```
-go build -o build/pms .        # build
-./build/pms                    # run
-go vet ./...                   # static check
-go test ./...                  # headless smoke test
-./packaging/build-deb.sh 1.0.1 # build dist/pms_1.0.1_amd64.deb
+go build -o build/pinginfomanager .    # build
+./build/pinginfomanager                # run
+go vet ./...                           # static check
+go test -race ./...                    # headless smoke test
+./packaging/build-deb.sh 1.1.0         # release .deb, built in an Ubuntu 22.04 container
+./packaging/build-deb.sh --local 1.1.0 # same, host toolchain — do not ship this one
 ```
+
+**Release `.deb`s must be built in the container** (the default). The supported floor is Ubuntu
+22.04, and a cgo binary needs a glibc at least as new as the one it linked against — see the
+`packaging/` entry below for the full story.
 
 **Do not drive the running app with synthetic clicks/keystrokes to test it.** This repo lives on
 a desktop that also has live root SSH sessions to network gear on screen; misdirected synthetic
@@ -29,7 +43,7 @@ off.
 
 `smoke_test.go` is the only test: it builds the whole UI against `test.NewApp()` (headless, no
 window opens) and exercises add/remove/sort/resize-drag/formatting plus the config round trip
-(pointed at `t.TempDir()`, never the real `~/.config/pms`).
+(pointed at `t.TempDir()`, never the real `~/.config/pinginfomanager`).
 
 It is expected to stay clean under `go test -race ./...`, which constrains how tests drive
 hostname lookups. `test.NewApp`'s driver runs `fyne.Do` *inline on the calling goroutine*
@@ -157,7 +171,8 @@ sudo apt install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
   The community/version are constants, not settings fields — a wrong one just yields "Unknown".
   `appState.lookupName` holds this function so tests can stub it instead of forking a subprocess.
 - `config.go` — saves and restores the device list and the light/dark choice as JSON at
-  `os.UserConfigDir()/pms/config.json`. Deliberate choices: only `{ip, name}` per device is
+  `os.UserConfigDir()/pinginfomanager/config.json` (`configDirName`, via `configPathIn`).
+  Deliberate choices: only `{ip, name}` per device is
   stored — counters measure one run, and `Hostname` is re-asked over SNMP on load (a remembered
   sysName would go stale silently, and `restoreDevices` starts the same lookup `addDevice` does,
   so a restored row shows `Resolving…` then the live answer or `Empty`); `theme` is `"light"`/
@@ -177,6 +192,18 @@ sudo apt install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
   has to exist). `restoreDevices` takes the list rather than re-reading the file, and returns the
   lookups' completion channels for tests; its `fyne.Do` callbacks landing before `ShowAndRun` is
   safe, the glfw driver queues them on an unbounded channel until the loop starts.
+  `migrateLegacyConfig` carries a device list across the rename, which moved this directory:
+  the pre-1.1.0 app stored the same file at `os.UserConfigDir()/pms/config.json`
+  (`legacyConfigDirName`, reached via `legacyConfigPath()`), and without the migration the rename
+  would read as a first run and silently drop the user's list. It is keyed on the **new file not
+  existing**, never on its contents being empty — a user who removes every device leaves a valid
+  config holding an empty list, and treating that as "nothing saved yet" would resurrect the old
+  list on the next launch. It copies through `loadConfig`/`saveConfig` rather than byte for byte,
+  so a corrupt old file is reported once here instead of being carried forward, and it leaves the
+  old file on disk rather than deleting it (a downgrade to the 1.0.1 package still finds its
+  list). `main.go` runs it once, immediately after setting `configFile` and *before*
+  `loadSavedConfig`, and only logs a failure — a config that can't be carried over is a first
+  run, not a reason to refuse to start.
 - `settings.go` — an always-visible settings row under the toolbar (no button to show/hide it):
   validated `widget.Entry` fields for interval/timeout apply on every valid `OnChanged`; interface
   is a `widget.Select` populated once from `net.Interfaces()` rather than free text. Changing the
@@ -223,13 +250,54 @@ sudo apt install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
   the rows keep the old palette's tint until some later cycle happens to change one.
   `main.go` applies the saved mode *before* `buildUI`, so the first paint is already in the right
   palette rather than flipping after the window appears.
-- `main.go` — embeds `assets/*.png` via `//go:embed`, sets app metadata, then runs one fixed
-  order that the rest of the app depends on: point `configFile` at `defaultConfigPath()`, read the
-  file once (`loadSavedConfig`), `applyThemeMode` — which also installs the custom theme, saved
-  choice or not — then `buildUI`/`SetContent`, then `restoreDevices`, then `ShowAndRun`.
-- `packaging/` — `pms.desktop` + `build-deb.sh`, which hand-rolls a `DEBIAN/control` +
+- `main.go` — holds `appDisplayName`, embeds `assets/*.png` via `//go:embed`, sets app metadata,
+  then runs one fixed order that the rest of the app depends on: point `configFile` at
+  `defaultConfigPath()`, `migrateLegacyConfig` from `legacyConfigPath()`, read the file once
+  (`loadSavedConfig`), `applyThemeMode` — which also installs the custom theme, saved choice or
+  not — then `buildUI`/`SetContent`, then `restoreDevices`, then `ShowAndRun`.
+- `packaging/` — `pinginfomanager.desktop` + `build-deb.sh`, which hand-rolls a `DEBIAN/control` +
   `usr/bin`/`usr/share/...` tree and calls `dpkg-deb --build` (no extra packaging tool required;
-  `fyne package` only produces a `.tar.gz` on Linux, not a `.deb`).
+  `fyne package` only produces a `.tar.gz` on Linux, not a `.deb`), plus `Dockerfile.build`.
+  Three things here are load-bearing, all learned from the 1.0.1 package failing on Ubuntu 22.04:
+  - **The build runs in an Ubuntu 22.04 container by default.** 22.04 is the supported floor, and
+    a cgo binary needs a glibc at least as new as the one it linked against. Compiled on this
+    24.04 desktop the binary picks up glibc 2.38's C23 redirects — `__isoc23_sscanf`,
+    `__isoc23_strtol`, `__isoc23_strtoul` — which do not exist in 22.04's glibc 2.35, so `dpkg -i`
+    succeeded and the program then died with ``libc.so.6: version `GLIBC_2.38' not found``.
+    Linking against 2.35 is forward compatible, so one `.deb` covers 22.04 and everything later.
+    `--local` builds with the host toolchain for checking the packaging, and must not be shipped.
+    The image installs no Go: the script bind-mounts the host's `GOROOT` (the Go toolchain is
+    statically linked, so it runs in 22.04's older userspace) plus the module cache read-only,
+    with `GOPROXY=off` and `--user` so the container needs no network and leaves nothing
+    root-owned behind. `go mod download` runs on the host first, where the cache is writable.
+  - **`Depends:` states the glibc floor, derived from the built binary** rather than hardcoded —
+    `GLIBC_MIN` is the highest `GLIBC_x.y` symbol version `objdump -T` reports, emitted as
+    `libc6 (>= x.y)`. This is what makes the failure mode impossible to reintroduce: a `--local`
+    build on a newer machine now produces a package apt *refuses* to install on an older one,
+    instead of one that installs and cannot start.
+  - **The dependency list covers dlopened libraries too.** `libGL.so.1` and
+    `libwayland-client.so.0` are hard ELF `NEEDED` entries, while glfw opens the X11, xkbcommon
+    and remaining Wayland libraries with `dlopen` at runtime, picking a set according to the
+    session — so both sets have to be installed. 1.0.1 listed neither `libwayland-client0` (a hard
+    requirement it got away with only because a desktop Ubuntu already has it) nor `libxext6`,
+    `libxrender1` or `libxkbcommon0`. `strings` on the binary lists the candidates.
+  - **The packaged build alone gets `-trimpath` and `-ldflags="-s -w"`**; a development
+    `go build` keeps everything. `-s -w` drops the symbol table and DWARF: measured at 1.0.1 the
+    binary went 31.4MB -> 23.2MB and the `.deb` 15.7MB -> 9.6MB, and panic traces still name
+    functions and lines because Go reads those from the pclntab, which `-s -w` leaves alone; what
+    is lost is attaching gdb/delve to the installed binary. `-trimpath` rewrites the ~634 absolute
+    source paths the compiler embeds into module-relative ones, so a trace reads
+    `fyne.io/fyne/v2@v2.8.0/app/cache.go` and not a path on the build machine — which through
+    1.0.1 was the maintainer's home directory, and once the build moved into the container became
+    `/src` and `/gomodcache`. It also makes the container build byte-for-byte reproducible, so a
+    release can be checked by rebuilding it (verified: two runs, identical binaries). That holds
+    *within* one builder image only — a container build and a `--local` build of identical source
+    still differ, since cgo compiles against whichever gcc and glibc the environment has (also
+    verified). Neither flag costs anything for a package that is not debugged in place.
+
+  There is deliberately **no `Conflicts:`/`Replaces:` on `pms`**: the old package shared that name
+  with an unrelated program in the Ubuntu archive, so declaring a conflict would fight that
+  package rather than our own history. `README.md` tells upgraders to `apt remove pms` themselves.
 
 Key invariants:
 - **Threading**: this app uses Fyne's `fyne.Do`/`fyne.DoAndWait` model (opted in via

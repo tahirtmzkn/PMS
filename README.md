@@ -1,9 +1,13 @@
-**PMS**
+**PingInfoManager**
 -----------------------
-Ping Monitoring System — a small Fyne (Go) desktop app that continuously pings a list of
-IP addresses/devices and shows live success/fail/total/loss counters, color-coded green/red by
-the last ping's result. It ships as a single binary and installs from a `.deb` like any other
-desktop app.
+A small Fyne (Go) desktop app that continuously pings a list of IP addresses/devices and shows
+live success/fail/total/loss counters, color-coded green/red by the last ping's result. It ships
+as a single binary and installs from a `.deb` like any other desktop app.
+
+> Renamed from **PMS** / *Ping Monitoring System*: `pms` is already taken by an unrelated package
+> in the Ubuntu archive, so the binary, the Debian package and the config directory are all
+> `pinginfomanager` now. A device list saved by the old version is carried over automatically the
+> first time this one starts — see [Saved configuration](#saved-configuration).
 
 
 Features
@@ -38,33 +42,60 @@ everything else works. The MIB files (`snmp-mibs-downloader`) are **not** requir
 queries the numeric OID precisely so it doesn't depend on them. The `.deb` declares both
 packages, so `apt` pulls them in for you.
 
+Ubuntu **22.04 or later**. The `.deb` states the glibc version it was built against, so apt
+refuses to install it on anything older instead of installing a binary that cannot start.
+
 To build from source you need Go 1.22+ and, once, the cgo/OpenGL/X11 headers:
 ```
 sudo apt install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
 ```
+Building the release `.deb` also needs Docker; see below for why.
 
 
 Build & run
 -----------------------
 ```
-$ go build -o build/pms .
-$ ./build/pms
+$ go build -o build/pinginfomanager .
+$ ./build/pinginfomanager
 ```
 
 
 Install as a .deb (Ubuntu)
 -----------------------
 ```
-$ ./packaging/build-deb.sh 1.0.1
-$ sudo apt install ./dist/pms_1.0.1_amd64.deb
+$ ./packaging/build-deb.sh 1.1.0
+$ sudo apt install ./dist/pinginfomanager_1.1.0_amd64.deb
 ```
 
-This installs the `pms` binary, a desktop entry and an icon, so it launches from the
-application menu or via `pms` in a terminal on any Ubuntu machine — no Go toolchain needed on
-the target. Uninstall with `sudo apt remove pms`.
+This installs the `pinginfomanager` binary, a desktop entry and an icon, so it launches from the
+application menu or via `pinginfomanager` in a terminal on any Ubuntu machine — no Go toolchain
+needed on the target. Uninstall with `sudo apt remove pinginfomanager`.
 
-The version is just the argument to the script (`dist/pms_<version>_<arch>.deb`); the script
-clears `dist/` on each run, so only the package you just built is left there.
+The version is just the argument to the script (`dist/pinginfomanager_<version>_<arch>.deb`); the
+script clears `dist/` on each run, so only the package you just built is left there.
+
+**The build runs in a container, on purpose.** By default the script compiles the binary inside
+Ubuntu 22.04 (`packaging/Dockerfile.build`), because a cgo binary needs a glibc at least as new as
+the one it was linked against. Built on a 24.04 desktop, the binary picks up glibc 2.38's C23
+redirects (`__isoc23_sscanf`, `__isoc23_strtol`, `__isoc23_strtoul`), which do not exist in
+22.04's glibc 2.35 — `dpkg -i` then succeeds and the program dies at startup with
+``libc.so.6: version `GLIBC_2.38' not found``. Compiling against 2.35 is forward compatible, so
+one package covers 22.04, 24.04 and later. Nothing is downloaded into the image: the script mounts
+your own Go toolchain, so container and local builds use the same Go version.
+
+`--local` skips the container and uses the host toolchain — quicker, no Docker needed, but the
+result only runs on a glibc as new as your machine's. Use it to check the packaging, not to
+produce anything you hand to someone else:
+```
+$ ./packaging/build-deb.sh --local 1.1.0
+```
+
+If you still have the old package installed, remove it separately — it was called `pms`, and
+because that name belongs to a different program upstream the new package deliberately does not
+declare a conflict with it:
+```
+$ sudo apt remove pms
+```
 
 
 Using it
@@ -101,7 +132,7 @@ remembered — they start at the defaults above on every launch. The device list
 
 Saved configuration
 -----------------------
-The device list and the theme choice are written to `~/.config/pms/config.json` and read back at
+The device list and the theme choice are written to `~/.config/pinginfomanager/config.json` and read back at
 startup, so the app reopens with the same devices in the same order and the same look. It is saved
 whenever any of that changes — adding, removing, sorting or dragging a row, or picking a theme —
 not on exit, so a crash or a `kill` doesn't lose it either.
@@ -118,6 +149,12 @@ Only what you chose is stored, one entry per device:
 ```
 
 `theme` is `light` or `dark`, and is left out entirely while the theme follows the desktop.
+
+**Upgrading from PMS.** The old version kept this file at `~/.config/pms/config.json`. On its
+first start the renamed app copies that file to the new path, so the device list and theme survive
+the rename. It only does so when the new file does not exist yet, so a list you have since edited
+— including one you deliberately emptied — is never overwritten by the old one. The old file is
+left where it is rather than deleted.
 
 Counters are not saved — they measure one run, so every launch starts at zero. Hostnames are not
 saved either: each device is asked for its SNMP hostname again on startup, so the column shows
@@ -163,14 +200,15 @@ them there if your gear uses something else.
 Development
 -----------------------
 ```
-$ go build -o build/pms .        # build
-$ go vet ./...                   # static check
-$ go test ./...                  # headless smoke test
+$ go build -o build/pinginfomanager .   # build
+$ go vet ./...                          # static check
+$ go test -race ./...                   # headless smoke test
 ```
 
 `smoke_test.go` builds the entire UI against Fyne's headless test app — no window opens — and
 exercises adding/removing devices, sorting, the column-resize drag, the row-reorder drag and
 its animation, loss formatting, the status line, SNMP hostname resolution (with the lookup
 stubbed, so tests never fork `snmpget`), the light/dark theme choice and the saved-config round
-trip (against a temp directory, never your real config). It's the intended way to check UI changes,
+trip including the migration from the old config directory (against a temp directory, never your
+real config). It's the intended way to check UI changes,
 especially to the custom widgets, without putting a window on the screen.

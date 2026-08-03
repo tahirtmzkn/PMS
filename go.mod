@@ -1,4 +1,4 @@
-module pms
+module pinginfomanager
 
 go 1.22.2
 

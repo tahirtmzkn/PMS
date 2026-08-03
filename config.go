@@ -35,12 +35,66 @@ type savedDevice struct {
 // another machine by hand.
 const configFileName = "config.json"
 
-func defaultConfigPath() (string, error) {
+// configDirName is the per-app directory under os.UserConfigDir() that holds
+// configFileName, and legacyConfigDirName is the one used before the app was
+// renamed from "PMS" to PingInfoManager. The old directory is still read once,
+// by migrateLegacyConfig, so the rename doesn't silently look like a first run
+// and lose a user's device list.
+const (
+	configDirName       = "pinginfomanager"
+	legacyConfigDirName = "pms"
+)
+
+func configPathIn(dirName string) (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "pms", configFileName), nil
+	return filepath.Join(dir, dirName, configFileName), nil
+}
+
+func defaultConfigPath() (string, error) { return configPathIn(configDirName) }
+
+func legacyConfigPath() (string, error) { return configPathIn(legacyConfigDirName) }
+
+// migrateLegacyConfig brings a pre-rename device list forward, copying
+// legacyPath to path the first time the renamed app runs.
+//
+// It is keyed on path not *existing*, never on its contents being empty: a user
+// who removes every device leaves a valid config with an empty list behind, and
+// treating that as "nothing saved yet" would resurrect the old list on the next
+// launch. Once the new file is there, for any reason, the old one is never
+// looked at again — it is left on disk rather than deleted, so a downgrade to
+// the previous package still finds its list.
+//
+// A missing legacy file is a genuine first run and not an error.
+func migrateLegacyConfig(path, legacyPath string) error {
+	if path == "" || legacyPath == "" || path == legacyPath {
+		return nil
+	}
+
+	switch _, err := os.Stat(path); {
+	case err == nil:
+		return nil // already migrated, or a list this app has since written
+	case !errors.Is(err, fs.ErrNotExist):
+		return err
+	}
+
+	switch _, err := os.Stat(legacyPath); {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil // nothing to bring forward
+	case err != nil:
+		return err
+	}
+
+	// Round-tripped through loadConfig/saveConfig rather than copied byte for
+	// byte, so a corrupt old file is reported here instead of being carried
+	// over to fail again under the new name.
+	cfg, err := loadConfig(legacyPath)
+	if err != nil {
+		return err
+	}
+	return saveConfig(path, cfg)
 }
 
 // loadConfig reads the config file. A file that isn't there yet is a first run,

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=PingInfoManager
+Comment=Monitor network devices with continuous ping and SNMP hostnames
+Exec=/usr/bin/pinginfomanager
+Icon=pinginfomanager
+Categories=Network;Monitor;
+Terminal=false
