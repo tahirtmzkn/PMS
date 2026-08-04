@@ -1,5 +1,7 @@
 package main
 
+import "time"
+
 // Device is one monitored target and its running ping statistics. Name is what
 // the user typed (blank is allowed and stays blank); Hostname is what the
 // device called itself over SNMP, resolved in the background for every device.
@@ -18,6 +20,24 @@ type Device struct {
 	Fail       int
 	Total      int
 	LastResult bool
+
+	// failHeldUntil is how long a failure keeps the row reading as failed even
+	// after a later request has been answered. Without it a lost packet is
+	// almost invisible: a failure is only known one timeout after its request
+	// went out, while the *next* request goes out one interval after it and is
+	// answered in about a millisecond — so at the default 1s interval and
+	// 1000ms timeout the row turned red and green again within the same frame or
+	// two. Written by applyProbeResult, read through showsFail; run state like
+	// the counters, so it is not persisted.
+	failHeldUntil time.Time
+}
+
+// showsFail reports whether the device should read as failed at time now: its
+// last outcome was a failure, or a recent failure is still being held on screen.
+// It is only about presentation — the Fail and Loss columns count every failure
+// the moment it is known, held or not.
+func (d *Device) showsFail(now time.Time) bool {
+	return !d.LastResult || now.Before(d.failHeldUntil)
 }
 
 // Resolved is how many of the sent requests have an outcome. Total - Resolved

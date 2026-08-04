@@ -81,6 +81,12 @@ sudo apt install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
   at different moments (a reply comes back in ~1ms; a failure is only known a whole timeout later).
   `Resolved()` is `Success + Fail`, and `Total - Resolved()` is what is in flight — which is why
   Loss divides by `Resolved()`, see `formatLoss`.
+  `failHeldUntil` + `showsFail(now)` are the **visual** side of a failure, separate from the
+  counters: a row reads as failed while `!LastResult` *or* a recent failure is still being held.
+  The hold exists because the timing hides losses otherwise — a failure is only known one timeout
+  after its request went out, while the next request goes out one interval after it and is answered
+  in ~1ms, so at the default 1s/1000ms a lost packet turned the row red and green again inside a
+  frame or two. Only presentation is held; `Fail`/`Loss` count the failure the moment it is known.
 - `ping.go` — `pingOne` shells out to the system `ping` binary
   (`ping -n -I <interface> -c 1 -W <whole_sec> <ip>`). `probeDevices` fans a request out to every
   device concurrently and calls `onResult` with `(*Device, ok)` as each finishes. `onResult` hands
@@ -392,3 +398,13 @@ Key invariants:
   10). `TestTickSendCadence` pins this.
 - Row background only reflects last-ping status while `running` is true; otherwise it's
   `color.Transparent` (not a hardcoded white), so it looks correct in both light and dark themes.
+- **A failure holds the row red for at least half the interval** (`failHoldDuration`, floored at
+  `minFailHold`), so a single lost packet is something the eye can catch — see `device.go` for why
+  it is otherwise a one-frame flash. `colorRow` and `refreshStatus` both read `Device.showsFail`,
+  so the up/down tally can never say "0 down" beside a red row. The hold is a **floor, not a
+  scheduled duration**: nothing arms a timer for its expiry, the row is simply repainted by
+  whatever touches it next, which while running is at most one interval away (every `tick`
+  recolors every row for its `Total`, and each device's own results land in between). That is what
+  keeps it free of extra goroutines and of anything to cancel on Stop/Clear/remove — and a row
+  cannot get stuck red, since `stop()` repaints all of them transparent. `TestFailHold` and
+  `TestFailHoldDuration` pin it.

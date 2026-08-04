@@ -60,6 +60,10 @@ const (
 	resolvingHostname = "Resolving…"
 )
 
+// minFailHold is the shortest a failure can hold a row red — see
+// failHoldDuration.
+const minFailHold = 500 * time.Millisecond
+
 // sortColumn identifies which column the table is currently sorted by.
 type sortColumn int
 
@@ -354,16 +358,19 @@ func (pm *appState) refreshStatus() {
 	}
 
 	up, down, pending := 0, 0, 0
+	now := time.Now()
 	for _, d := range pm.devices {
 		switch {
 		// Resolved, not Total: a device whose first request is still in flight
 		// has a Total of 1 already but nothing measured yet.
 		case d.Resolved() == 0:
 			pending++
-		case d.LastResult:
-			up++
-		default:
+		// The same held view of a failure the rows use, so the tally can't read
+		// "0 down" next to a red row — the two are read together.
+		case d.showsFail(now):
 			down++
+		default:
+			up++
 		}
 	}
 
@@ -587,10 +594,10 @@ func (pm *appState) newRow(device *Device) *deviceRow {
 func (pm *appState) colorRow(row *deviceRow, device *Device) {
 	col := color.Color(color.Transparent)
 	if pm.running {
-		if device.LastResult {
-			col = tinted(theme.SuccessColor(), 90)
-		} else {
+		if device.showsFail(time.Now()) {
 			col = tinted(theme.ErrorColor(), 90)
+		} else {
+			col = tinted(theme.SuccessColor(), 90)
 		}
 	}
 
@@ -1099,7 +1106,33 @@ func (pm *appState) applyProbeResult(d *Device, ok bool, gen uint64) {
 		d.Success++
 	} else {
 		d.Fail++
+		// Hold the row red for a while so the loss is actually visible — see
+		// failHoldDuration and Device.failHeldUntil. A further failure just
+		// pushes the deadline out again.
+		d.failHeldUntil = time.Now().Add(failHoldDuration(pm.pingInterval))
 	}
 	pm.updateRowResult(d)
 	pm.refreshStatus()
+}
+
+// failHoldDuration is the shortest time one failure keeps a row red: half the
+// send interval, so it scales with the cadence the user chose instead of being a
+// hardcoded blink.
+//
+// It is a floor, not a duration — nothing schedules a repaint when it expires.
+// The row is next recolored by whatever touches it next, and while running that
+// is at most one interval away (every tick recolors every row for its Total,
+// and each device's own results land in between). So a failure reads as red for
+// somewhere between half an interval and a full one, which is the range the
+// perception of a "blink" needed and is why this needs no timer, no extra
+// goroutine and nothing to cancel on Stop/Clear/remove. A row cannot get stuck
+// red either: stopping repaints every row transparent regardless.
+//
+// The floor guards a zero interval only; the settings entry will not apply
+// anything below 1s.
+func failHoldDuration(intervalSec int) time.Duration {
+	if hold := time.Duration(intervalSec) * time.Second / 2; hold > minFailHold {
+		return hold
+	}
+	return minFailHold
 }

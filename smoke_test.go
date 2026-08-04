@@ -1,6 +1,7 @@
 package main
 
 import (
+	"image/color"
 	"net"
 	"os"
 	"os/exec"
@@ -1031,5 +1032,100 @@ func TestApplyProbeResult(t *testing.T) {
 	pm.applyProbeResult(d, false, pm.probeGen)
 	if d.Fail != 0 {
 		t.Errorf("outcome recorded for a removed device: fail=%d", d.Fail)
+	}
+}
+
+// TestFailHold covers the held failure highlight: one lost request keeps its row
+// (and the status tally) reading as failed even though the next request is
+// answered, until the hold expires. Without it a 1s interval / 1000ms timeout
+// showed the red for about a millisecond — the failure lands one timeout after
+// its request, the next reply about one millisecond after that.
+func TestFailHold(t *testing.T) {
+	a := test.NewApp()
+	defer a.Quit()
+
+	win := a.NewWindow(appDisplayName)
+	pm := newAppState(win, fyne.NewStaticResource("trash.png", trashPNG))
+	win.SetContent(pm.buildUI(fyne.NewStaticResource("ping-pong.png", pingPongPNG)))
+	pm.lookupName = func(ip, iface string) string { return "" }
+
+	<-pm.addDevice("10.0.0.1", "a")
+	d := pm.devices[0]
+	pm.running = true
+	pm.refreshRows()
+
+	red := tinted(theme.ErrorColor(), 90)
+	green := tinted(theme.SuccessColor(), 90)
+	rowColor := func() color.Color { return pm.rowFor(d).bg.FillColor }
+
+	d.Total = 2 // as if tick had sent both requests
+	pm.applyProbeResult(d, false, pm.probeGen)
+	if rowColor() != red {
+		t.Fatalf("row after a failure = %v, want the error tint %v", rowColor(), red)
+	}
+
+	// The reply to the *next* request lands almost immediately. The counters
+	// must record it — only the highlight is held.
+	pm.applyProbeResult(d, true, pm.probeGen)
+	if rowColor() != red {
+		t.Errorf("row went green while the failure was still held: %v", rowColor())
+	}
+	if d.Success != 1 || d.Fail != 1 {
+		t.Errorf("held highlight changed the counters: success=%d fail=%d, want 1/1", d.Success, d.Fail)
+	}
+	if got := pm.rowFor(d).loss.Text; got != "%50" {
+		t.Errorf("loss = %q, want %q — the hold is visual only", got, "%50")
+	}
+	want := "Monitoring  ·  1 device  ·  0 up  ·  1 down"
+	if got := pm.statusLabel.Text; got != want {
+		t.Errorf("status during the hold = %q, want %q", got, want)
+	}
+
+	// Once the hold has passed, the next thing to touch the row (a tick, or the
+	// device's own next result) paints it from the real last outcome.
+	d.failHeldUntil = time.Now().Add(-time.Millisecond)
+	pm.updateRowResult(d)
+	pm.refreshStatus()
+	if rowColor() != green {
+		t.Errorf("row after the hold expired = %v, want the success tint %v", rowColor(), green)
+	}
+	want = "Monitoring  ·  1 device  ·  1 up  ·  0 down"
+	if got := pm.statusLabel.Text; got != want {
+		t.Errorf("status after the hold = %q, want %q", got, want)
+	}
+
+	// A failure while one is already held pushes the deadline out rather than
+	// inheriting the old one.
+	pm.applyProbeResult(d, false, pm.probeGen)
+	first := d.failHeldUntil
+	pm.applyProbeResult(d, false, pm.probeGen)
+	if !d.failHeldUntil.After(first) {
+		t.Errorf("second failure did not extend the hold: %v then %v", first, d.failHeldUntil)
+	}
+
+	// Stopped, the table shows no status coloring at all — a held failure must
+	// not survive that.
+	pm.stop()
+	if got := rowColor(); got != color.Color(color.Transparent) {
+		t.Errorf("row still tinted after Stop: %v", got)
+	}
+}
+
+// TestFailHoldDuration pins the hold at half the send interval, with a floor so
+// it is never zero.
+func TestFailHoldDuration(t *testing.T) {
+	cases := []struct {
+		interval int
+		want     time.Duration
+	}{
+		{0, minFailHold}, // never reachable from the settings entry (floor is 1s)
+		{1, 500 * time.Millisecond},
+		{2, time.Second},
+		{9, 4500 * time.Millisecond},
+	}
+	for _, c := range cases {
+		if got := failHoldDuration(c.interval); got != c.want {
+			t.Errorf("failHoldDuration(%d) = %v, want %v", c.interval, got, c.want)
+		}
 	}
 }
