@@ -11,14 +11,17 @@ or red (last ping failed). It's a from-scratch rewrite of an earlier PyQt5/Pytho
 (see git history) — the goals were a nicer default UI and a single installable binary instead
 of a Python venv.
 
-The app was called **PMS** (Ping Monitoring System) through 1.0.1. It was renamed because `pms`
-is an existing, unrelated package in the Ubuntu archive, so every installable and on-disk name
-collided with it. Three names are now distinct on purpose and should not be conflated:
-`PingInfoManager` (the display name, `appDisplayName` in `main.go` — window title and desktop
-entry), `pinginfomanager` (Go module, Debian package, binary, and the `~/.config` directory —
-lowercase because Debian requires it), and `pms`, which now appears **only** in the two places
-that must still recognise the old world: `legacyConfigDirName` in `config.go` and the upgrade
-notes in `README.md`.
+Two names are distinct on purpose and should not be conflated: `PingInfoManager` (the display name,
+`appDisplayName` in `main.go` — window title and desktop entry) and `pinginfomanager` (Go module,
+Debian package, binary, and the `~/.config` directory — lowercase because Debian requires it).
+
+A third, `pms`, survives in **one** place only: `legacyConfigDirName` in `config.go`, read once by
+`migrateLegacyConfig`. During development the app was briefly called that, and it stored its device
+list at `~/.config/pms/config.json`; the constant exists so a machine that ran that build keeps its
+list instead of looking like a first run. That name is not part of the released app and must not
+appear anywhere user-facing — not in `README.md`, not in the package metadata, not in release notes.
+The name was dropped because `pms` is an existing, unrelated package in the Ubuntu archive, which is
+also why the `.deb` declares no `Conflicts:`/`Replaces:` on it (see `packaging/`).
 
 ## Commands
 
@@ -231,16 +234,15 @@ sudo apt install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
   has to exist). `restoreDevices` takes the list rather than re-reading the file, and returns the
   lookups' completion channels for tests; its `fyne.Do` callbacks landing before `ShowAndRun` is
   safe, the glfw driver queues them on an unbounded channel until the loop starts.
-  `migrateLegacyConfig` carries a device list across the rename, which moved this directory:
-  the pre-1.1.0 app stored the same file at `os.UserConfigDir()/pms/config.json`
-  (`legacyConfigDirName`, reached via `legacyConfigPath()`), and without the migration the rename
-  would read as a first run and silently drop the user's list. It is keyed on the **new file not
+  `migrateLegacyConfig` carries a device list forward from the directory a pre-release build used
+  (`os.UserConfigDir()/pms/config.json`, `legacyConfigDirName`, reached via `legacyConfigPath()`),
+  which the naming change moved; without it a machine that ran that build would read as a first run
+  and silently drop the user's list. It is keyed on the **new file not
   existing**, never on its contents being empty — a user who removes every device leaves a valid
   config holding an empty list, and treating that as "nothing saved yet" would resurrect the old
   list on the next launch. It copies through `loadConfig`/`saveConfig` rather than byte for byte,
   so a corrupt old file is reported once here instead of being carried forward, and it leaves the
-  old file on disk rather than deleting it (a downgrade to the 1.0.1 package still finds its
-  list). `main.go` runs it once, immediately after setting `configFile` and *before*
+  old file on disk rather than deleting it. `main.go` runs it once, immediately after setting `configFile` and *before*
   `loadSavedConfig`, and only logs a failure — a config that can't be carried over is a first
   run, not a reason to refuse to start.
 - `settings.go` — an always-visible settings row under the toolbar (no button to show/hide it):
@@ -362,9 +364,9 @@ sudo apt install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
     still differ, since cgo compiles against whichever gcc and glibc the environment has (also
     verified). Neither flag costs anything for a package that is not debugged in place.
 
-  There is deliberately **no `Conflicts:`/`Replaces:` on `pms`**: the old package shared that name
-  with an unrelated program in the Ubuntu archive, so declaring a conflict would fight that
-  package rather than our own history. `README.md` tells upgraders to `apt remove pms` themselves.
+  There is deliberately **no `Conflicts:`/`Replaces:` on `pms`**: that name belongs to an unrelated
+  program in the Ubuntu archive, so declaring a conflict would fight that package rather than
+  anything of ours. Nothing user-facing mentions the name at all — see the note at the top.
 
 Key invariants:
 - **Threading**: this app uses Fyne's `fyne.Do`/`fyne.DoAndWait` model (opted in via

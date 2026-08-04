@@ -36,10 +36,10 @@ type savedDevice struct {
 const configFileName = "config.json"
 
 // configDirName is the per-app directory under os.UserConfigDir() that holds
-// configFileName, and legacyConfigDirName is the one used before the app was
-// renamed from "PMS" to PingInfoManager. The old directory is still read once,
-// by migrateLegacyConfig, so the rename doesn't silently look like a first run
-// and lose a user's device list.
+// configFileName. legacyConfigDirName is the directory a pre-release build used
+// under its working name; it is still read once, by migrateLegacyConfig, so a
+// machine that ran that build doesn't silently look like a first run and lose its
+// device list. Nothing user-facing carries that name — see CLAUDE.md.
 const (
 	configDirName       = "pinginfomanager"
 	legacyConfigDirName = "pms"

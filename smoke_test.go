@@ -624,8 +624,8 @@ func TestConfigFile(t *testing.T) {
 	}
 }
 
-// TestLegacyConfigMigration covers carrying a device list across the rename from
-// "PMS" to PingInfoManager, which moved the config directory. The case that
+// TestLegacyConfigMigration covers carrying a device list over from the config
+// directory a pre-release build used (see config.go). The case that
 // matters most is the third one: the migration keys on the new file not
 // existing, never on it being empty, so a user who deliberately removed every
 // device does not get the old list back on the next launch.

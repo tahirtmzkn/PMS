@@ -4,11 +4,6 @@ A small Fyne (Go) desktop app that continuously pings a list of IP addresses/dev
 live success/fail/total/loss counters, color-coded green/red by the last ping's result. It ships
 as a single binary and installs from a `.deb` like any other desktop app.
 
-> Renamed from **PMS** / *Ping Monitoring System*: `pms` is already taken by an unrelated package
-> in the Ubuntu archive, so the binary, the Debian package and the config directory are all
-> `pinginfomanager` now. A device list saved by the old version is carried over automatically the
-> first time this one starts — see [Saved configuration](#saved-configuration).
-
 
 Features
 -----------------------
@@ -70,8 +65,8 @@ $ ./build/pinginfomanager
 Install as a .deb (Ubuntu)
 -----------------------
 ```
-$ ./packaging/build-deb.sh 1.2.0
-$ sudo apt install ./dist/pinginfomanager_1.2.0_amd64.deb
+$ ./packaging/build-deb.sh 1.0.0
+$ sudo apt install ./dist/pinginfomanager_1.0.0_amd64.deb
 ```
 
 This installs the `pinginfomanager` binary, a desktop entry and an icon, so it launches from the
@@ -100,14 +95,7 @@ package's dependencies entirely.
 result only runs on a glibc as new as your machine's. Use it to check the packaging, not to
 produce anything you hand to someone else:
 ```
-$ ./packaging/build-deb.sh --local 1.2.0
-```
-
-If you still have the old package installed, remove it separately — it was called `pms`, and
-because that name belongs to a different program upstream the new package deliberately does not
-declare a conflict with it:
-```
-$ sudo apt remove pms
+$ ./packaging/build-deb.sh --local 1.0.0
 ```
 
 
@@ -168,12 +156,6 @@ Only what you chose is stored, one entry per device:
 ```
 
 `theme` is `light` or `dark`, and is left out entirely while the theme follows the desktop.
-
-**Upgrading from PMS.** The old version kept this file at `~/.config/pms/config.json`. On its
-first start the renamed app copies that file to the new path, so the device list and theme survive
-the rename. It only does so when the new file does not exist yet, so a list you have since edited
-— including one you deliberately emptied — is never overwritten by the old one. The old file is
-left where it is rather than deleted.
 
 Counters are not saved — they measure one run, so every launch starts at zero. Hostnames are not
 saved either: each device is asked for its SNMP hostname again on startup, so the column shows
@@ -238,9 +220,9 @@ $ go test -race ./...                   # headless smoke test
 ```
 
 `smoke_test.go` builds the entire UI against Fyne's headless test app — no window opens — and
-exercises adding/removing devices, sorting, the column-resize drag, the row-reorder drag and
-its animation, loss formatting, the status line, SNMP hostname resolution (with the lookup
-stubbed, so tests never fork `snmpget`), the light/dark theme choice and the saved-config round
-trip including the migration from the old config directory (against a temp directory, never your
-real config). It's the intended way to check UI changes,
-especially to the custom widgets, without putting a window on the screen.
+exercises adding/removing devices, sorting, the column-resize drag, the row-reorder drag and its
+animation, the send cadence and the counters (with the ping stubbed, so tests need no network),
+loss formatting, the status line, SNMP hostname resolution (with the lookup stubbed, so tests
+never fork `snmpget`), the light/dark theme choice and the saved-config round trip (against a temp
+directory, never your real config). It's the intended way to check UI changes, especially to the
+custom widgets, without putting a window on the screen.

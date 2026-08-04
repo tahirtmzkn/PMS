@@ -10,9 +10,7 @@ import (
 // appDisplayName is the name the user sees: the window title and the desktop
 // entry. It is deliberately not the same string as the Debian package or the
 // binary (both "pinginfomanager", lowercase because Debian requires it) or the
-// config directory. The app was called "PMS" until the rename; that name
-// collided with an unrelated package already in the Ubuntu archive, so nothing
-// user-visible or installable carries it any more.
+// config directory.
 const appDisplayName = "PingInfoManager"
 
 //go:embed assets/ping-pong.png
