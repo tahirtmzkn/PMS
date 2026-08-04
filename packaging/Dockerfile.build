@@ -1,21 +1,28 @@
 # Builder image for release .deb files.
 #
-# Ubuntu 22.04 on purpose: it is the oldest release PingInfoManager supports, and
+# Ubuntu 18.04 on purpose: it is the oldest release PingInfoManager supports, and
 # a cgo binary can only run against a glibc at least as new as the one it was
 # linked against. Built on 24.04 (glibc 2.39) the binary picks up glibc 2.38's
 # C23 redirects — __isoc23_sscanf, __isoc23_strtol, __isoc23_strtoul — which do
-# not exist in 22.04's glibc 2.35. dpkg installs such a package without
-# complaint and the binary then refuses to start, with
+# not exist in 22.04's glibc 2.35, let alone 18.04's 2.27. dpkg installs such a
+# package without complaint and the binary then refuses to start, with
 # "libc.so.6: version `GLIBC_2.38' not found". That is exactly the bug this
-# image exists to prevent. Linking against 2.35 is forward compatible, so one
-# .deb covers 22.04, 24.04 and later.
-FROM ubuntu:22.04
+# image exists to prevent. Linking against 2.27 is forward compatible, so one
+# .deb covers 18.04, 20.04, 22.04, 24.04 and later.
+#
+# 18.04 is past its standard support, but bionic is still served by
+# archive.ubuntu.com, so this image needs no old-releases.ubuntu.com rewriting.
+# If that ever changes, the sources.list has to be pointed there instead.
+FROM ubuntu:18.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# gcc + libc6-dev for cgo, then the same GL/X11/Wayland headers the README tells
-# a developer to install. glfw needs the Wayland and xkbcommon headers even
-# though it opens the X11 libraries with dlopen at runtime.
+# gcc + libc6-dev for cgo, then the GL/X11 headers the README tells a developer
+# to install. No Wayland or xkbcommon headers: build-deb.sh compiles with
+# -tags x11, which is what lets an 18.04 build work at all (see there). EGL
+# headers are needed even for the X11-only backend — glfw's egl_context.c is
+# compiled unconditionally — and on 18.04 they are a separate package rather
+# than something libgl1-mesa-dev pulls in.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates \
@@ -23,16 +30,16 @@ RUN apt-get update \
       gcc \
       libc6-dev \
       libgl1-mesa-dev \
+      libegl1-mesa-dev \
       xorg-dev \
-      libwayland-dev \
-      libxkbcommon-dev \
  && rm -rf /var/lib/apt/lists/*
 
-# Go comes from the upstream tarball rather than from apt, because 22.04 only
-# ships Go 1.18 and go.mod needs 1.22. build-deb.sh passes the host's own Go
-# version, so a container build and a --local build always use the same
-# toolchain; the download is a cached image layer, repeated only when that
-# version changes.
+# Go comes from the upstream tarball rather than from apt, because 18.04 only
+# ships Go 1.10 and go.mod needs 1.22. The tarball's toolchain is a static Go
+# binary, so it runs in 18.04's userspace regardless of how old that is.
+# build-deb.sh passes the host's own Go version, so a container build and a
+# --local build always use the same toolchain; the download is a cached image
+# layer, repeated only when that version changes.
 #
 # Not the host's GOROOT bind-mounted, which was the obvious alternative and does
 # not work: Debian/Ubuntu's golang packages symlink src/, api/, misc/ and test/

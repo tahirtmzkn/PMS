@@ -42,8 +42,13 @@ everything else works. The MIB files (`snmp-mibs-downloader`) are **not** requir
 queries the numeric OID precisely so it doesn't depend on them. The `.deb` declares both
 packages, so `apt` pulls them in for you.
 
-Ubuntu **22.04 or later**. The `.deb` states the glibc version it was built against, so apt
+Ubuntu **18.04 or later**. The `.deb` states the glibc version it was built against, so apt
 refuses to install it on anything older instead of installing a binary that cannot start.
+
+The packaged binary uses X11, so on a Wayland session it runs through XWayland (present on every
+mainstream Wayland desktop). That is what buys the 18.04 floor: glfw's Wayland backend needs
+libwayland 1.20, and 18.04 has 1.16. A plain `go build` from source is unaffected and still builds
+both backends.
 
 To build from source you need Go 1.22+ and, once, the cgo/OpenGL/X11 headers:
 ```
@@ -63,8 +68,8 @@ $ ./build/pinginfomanager
 Install as a .deb (Ubuntu)
 -----------------------
 ```
-$ ./packaging/build-deb.sh 1.1.0
-$ sudo apt install ./dist/pinginfomanager_1.1.0_amd64.deb
+$ ./packaging/build-deb.sh 1.2.0
+$ sudo apt install ./dist/pinginfomanager_1.2.0_amd64.deb
 ```
 
 This installs the `pinginfomanager` binary, a desktop entry and an icon, so it launches from the
@@ -75,19 +80,25 @@ The version is just the argument to the script (`dist/pinginfomanager_<version>_
 script clears `dist/` on each run, so only the package you just built is left there.
 
 **The build runs in a container, on purpose.** By default the script compiles the binary inside
-Ubuntu 22.04 (`packaging/Dockerfile.build`), because a cgo binary needs a glibc at least as new as
+Ubuntu 18.04 (`packaging/Dockerfile.build`), because a cgo binary needs a glibc at least as new as
 the one it was linked against. Built on a 24.04 desktop, the binary picks up glibc 2.38's C23
 redirects (`__isoc23_sscanf`, `__isoc23_strtol`, `__isoc23_strtoul`), which do not exist in
-22.04's glibc 2.35 — `dpkg -i` then succeeds and the program dies at startup with
-``libc.so.6: version `GLIBC_2.38' not found``. Compiling against 2.35 is forward compatible, so
-one package covers 22.04, 24.04 and later. Nothing is downloaded into the image: the script mounts
-your own Go toolchain, so container and local builds use the same Go version.
+22.04's glibc 2.35, never mind 18.04's 2.27 — `dpkg -i` then succeeds and the program dies at
+startup with ``libc.so.6: version `GLIBC_2.38' not found``. Compiling against 2.27 is forward
+compatible, so one package covers 18.04, 20.04, 22.04, 24.04 and later. The image gets Go from
+the upstream tarball at your own version, so container and local builds use the same toolchain.
+
+The container build also passes `-tags x11`, which is the other half of reaching 18.04: the
+default build compiles glfw's X11 *and* Wayland backends and chooses at runtime, but the Wayland
+one needs `WL_MARSHAL_FLAG_DESTROY` from libwayland 1.20 and 18.04 ships 1.16, so it does not
+compile there at all. The X11-only binary drops the Wayland and xkbcommon libraries from the
+package's dependencies entirely.
 
 `--local` skips the container and uses the host toolchain — quicker, no Docker needed, but the
 result only runs on a glibc as new as your machine's. Use it to check the packaging, not to
 produce anything you hand to someone else:
 ```
-$ ./packaging/build-deb.sh --local 1.1.0
+$ ./packaging/build-deb.sh --local 1.2.0
 ```
 
 If you still have the old package installed, remove it separately — it was called `pms`, and

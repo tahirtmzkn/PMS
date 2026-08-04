@@ -5,17 +5,17 @@
 #
 #   --local   compile with the host Go toolchain instead of in the container.
 #
-# By default the binary is compiled inside an Ubuntu 22.04 container (see
-# Dockerfile.build), which is what makes one .deb work on 22.04 and every later
+# By default the binary is compiled inside an Ubuntu 18.04 container (see
+# Dockerfile.build), which is what makes one .deb work on 18.04 and every later
 # release. --local is for checking the packaging itself: it needs no Docker, but
 # the binary then requires the glibc of whatever machine built it, so on a 24.04
-# desktop it will not run on 22.04. The Depends line reports the floor either
+# desktop it will not run on 18.04. The Depends line reports the floor either
 # way (see GLIBC_MIN below), so a --local package refuses to install where it
 # could not run rather than installing and failing to start.
 set -euo pipefail
 
 APP=pinginfomanager
-IMAGE=pinginfomanager-deb-builder:22.04
+IMAGE=pinginfomanager-deb-builder:18.04
 BUILD_MODE=docker
 
 args=()
@@ -75,7 +75,21 @@ LDFLAGS="-s -w"
 #   - a public binary stops carrying the build machine's directory layout.
 # It costs nothing here: source-level debugging of the packaged binary is
 # already gone with -s -w, and a development `go build` keeps both.
-BUILDFLAGS=(-trimpath)
+#
+# -tags x11 builds glfw with only its X11 backend, and it is what makes an 18.04
+# package possible. glfw's Wayland backend needs WL_MARSHAL_FLAG_DESTROY, which
+# arrived in libwayland 1.20 (2021); 18.04 has 1.16, so the default build — which
+# compiles X11 *and* Wayland and picks between them at runtime — does not
+# compile there at all, and could not be linked into a package that installs
+# there even if it did, since wayland-client is a hard NEEDED entry and the
+# symbol is missing from 18.04's copy. The X11-only binary drops the Wayland
+# libraries entirely (verified with objdump/strings) and, on a Wayland session,
+# runs through XWayland instead, which every mainstream Wayland desktop ships.
+# The visible cost is confined to that case: no native Wayland surface, so
+# fractional scaling goes through XWayland's scaling, and FYNE_PLATFORM=wayland
+# has nothing to select. A development `go build` is left alone, so the default
+# dual-backend build is still what gets exercised day to day on a modern desktop.
+BUILDFLAGS=(-trimpath -tags x11)
 
 if [[ "$BUILD_MODE" == local ]]; then
 	echo "Building $APP binary with the host toolchain..."
@@ -91,7 +105,7 @@ else
 	GO_VERSION="$(go env GOVERSION)"
 	GO_VERSION="${GO_VERSION#go}"
 
-	echo "Building the Ubuntu 22.04 builder image (Go $GO_VERSION)..."
+	echo "Building the Ubuntu 18.04 builder image (Go $GO_VERSION)..."
 	docker build -t "$IMAGE" -f packaging/Dockerfile.build \
 		--build-arg "GO_VERSION=$GO_VERSION" \
 		--build-arg "GO_ARCH=$ARCH" \
@@ -126,7 +140,8 @@ cp assets/ping-pong.png "$PKG_ROOT/usr/share/icons/hicolor/512x512/apps/$APP.png
 # instead of assumed. cgo links against whatever glibc compiled it, and a
 # package that does not declare that floor installs cleanly and then dies at
 # exec with "libc.so.6: version `GLIBC_2.38' not found" — which is exactly how
-# the 1.0.1 package, built on 24.04, behaved on 22.04. Stating it turns a
+# the 1.0.1 package, built on 24.04, behaved on 22.04 (and would behave on any
+# older release still). Stating it turns a
 # confusing runtime failure into an apt error that names the real problem.
 GLIBC_MIN=""
 if command -v objdump >/dev/null; then
@@ -143,16 +158,19 @@ else
 	echo "objdump not found, leaving the libc6 dependency unversioned" >&2
 fi
 
-# Every shared library the binary needs. libGL and libwayland-client are hard
-# ELF NEEDED entries; the X11, xkbcommon and remaining Wayland libraries are
-# opened by glfw with dlopen at runtime, one set or the other depending on
-# whether the session is X11 or Wayland, so both have to be present. 1.0.1
-# listed neither libwayland-client0 (a hard requirement it got away with only
-# because a desktop Ubuntu already has it) nor libxext6/libxrender1/libxkbcommon0.
+# Every shared library the binary needs. libGL is a hard ELF NEEDED entry; the
+# X11 libraries are opened by glfw with dlopen at runtime, so dpkg cannot see
+# them and they have to be listed by hand — `strings` on the binary lists the
+# candidates. 1.0.1 listed neither libxext6 nor libxrender1, and got away with it
+# only because a desktop Ubuntu already has them.
+#
+# The Wayland and xkbcommon packages that used to be here are gone with the
+# -tags x11 build above: that binary references no libwayland-* or libxkbcommon
+# at all (checked with objdump -p and strings), and depending on packages 18.04
+# either lacks or ships too old would have blocked the install for nothing.
 DEPENDS="$LIBC_DEP, libgl1"
 DEPENDS="$DEPENDS, libx11-6, libxcursor1, libxext6, libxi6, libxinerama1"
-DEPENDS="$DEPENDS, libxrandr2, libxrender1, libxxf86vm1, libxkbcommon0"
-DEPENDS="$DEPENDS, libwayland-client0, libwayland-cursor0, libwayland-egl1"
+DEPENDS="$DEPENDS, libxrandr2, libxrender1, libxxf86vm1"
 DEPENDS="$DEPENDS, iputils-ping, snmp"
 
 # Taken from the git identity, so a published package carries a real contact

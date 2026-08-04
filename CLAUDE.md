@@ -27,13 +27,15 @@ go build -o build/pinginfomanager .    # build
 ./build/pinginfomanager                # run
 go vet ./...                           # static check
 go test -race ./...                    # headless smoke test
-./packaging/build-deb.sh 1.1.0         # release .deb, built in an Ubuntu 22.04 container
-./packaging/build-deb.sh --local 1.1.0 # same, host toolchain — do not ship this one
+./packaging/build-deb.sh 1.2.0         # release .deb, built in an Ubuntu 18.04 container
+./packaging/build-deb.sh --local 1.2.0 # same, host toolchain — do not ship this one
 ```
 
 **Release `.deb`s must be built in the container** (the default). The supported floor is Ubuntu
-22.04, and a cgo binary needs a glibc at least as new as the one it linked against — see the
-`packaging/` entry below for the full story.
+18.04, and a cgo binary needs a glibc at least as new as the one it linked against — see the
+`packaging/` entry below for the full story. The packaged build is also X11-only (`-tags x11`),
+which is the other half of reaching 18.04; a development `go build` is not, so the two do not
+compile the same glfw backends.
 
 **Do not drive the running app with synthetic clicks/keystrokes to test it.** This repo lives on
 a desktop that also has live root SSH sessions to network gear on screen; misdirected synthetic
@@ -69,7 +71,7 @@ sudo apt install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
   separate on purpose: the name box is optional and its text is the only thing the Name column
   ever shows, while `Hostname` is always filled in from the device itself.
 - `ping.go` — `pingOne` shells out to the system `ping` binary
-  (`ping -n -I <interface> -c 1 -W <fractional_sec> <ip>`). `runCycle` fans a ping out to every
+  (`ping -n -I <interface> -c 1 -W <whole_sec> <ip>`). `runCycle` fans a ping out to every
   device concurrently, calling `onResult` as each device finishes and `onDone` once all have.
   `onResult` hands back the `*Device`, never its list index — the UI is free to reorder its list
   (sort, drag) while a cycle is still in flight. Three details are load-bearing for cycle time,
@@ -80,10 +82,23 @@ sudo apt install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
     devices being pinged one after another.
   - the semaphore is acquired *inside* each goroutine, not in the launch loop, so process spawns
     happen in parallel instead of queueing behind each other.
-  - `-W` is passed as fractional seconds (`pingWaitArg`). Truncating to whole seconds with a 1s
-    floor made every timeout setting below 1000ms cost a full second per unanswered host: a
-    40-device list at a 300ms timeout took 4.0s, now 0.3s.
-  Cycle wall time is therefore ~`timeout` + ~10ms regardless of device count (verified to 100).
+  - **the timeout is enforced by `runBounded`, not by ping's `-W`**, and `-W` is a whole number of
+    seconds *rounded up* (`pingWaitArg`) — a coarse backstop that can only fire after the real
+    deadline. It used to be the other way round (fractional `-W`, a `timeout + 2s` context as
+    backstop), which is correct on 20.04 and later but hangs *forever* on 18.04: that iputils
+    (s20161105) reads `-W` with `strtoul`, so "0.3" arrives as 0 and a 0 linger time waits for a
+    reply that never comes (measured: still running after 12s). Truncating to whole seconds with a
+    1s floor instead — the pre-1.1 behaviour — is what made every timeout setting below 1000ms
+    cost a full second per unanswered host.
+  `runBounded` starts the process, then arms a `time.AfterFunc` that kills it. Timing the budget
+  from *after* the fork/exec is the whole reason it isn't `exec.CommandContext`: a context deadline
+  has to include process spawn, so it needs a margin, and any margin is wrong in one direction or
+  the other — too tight and a busy machine's slow spawn kills a ping before the device ever got its
+  full timeout (a device that is up reads as down), too loose and every unanswered host holds the
+  cycle open for the slack. Cycle wall time is therefore ~`timeout` + ~1ms regardless of device
+  count, verified identically on 24.04 and in an 18.04 container (100ms → 101ms, 300ms → 301ms,
+  1500ms → 1501ms). Killing racing `Wait` is safe: `os.Process` marks itself done under a lock as
+  it is reaped, so the loser returns `ErrProcessDone` rather than signalling a recycled pid.
 - `ui.go` — `appState` holds all app state (devices, settings, running/isPinging flags, sort
   column/direction, the ticker's stop channel) and builds the window content: a single-row
   toolbar (logo, add-device controls, Start/Clear pinned right via a spacer), the always-visible
@@ -258,29 +273,54 @@ sudo apt install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
 - `packaging/` — `pinginfomanager.desktop` + `build-deb.sh`, which hand-rolls a `DEBIAN/control` +
   `usr/bin`/`usr/share/...` tree and calls `dpkg-deb --build` (no extra packaging tool required;
   `fyne package` only produces a `.tar.gz` on Linux, not a `.deb`), plus `Dockerfile.build`.
-  Three things here are load-bearing, all learned from the 1.0.1 package failing on Ubuntu 22.04:
-  - **The build runs in an Ubuntu 22.04 container by default.** 22.04 is the supported floor, and
+  Four things here are load-bearing, the first two learned from the 1.0.1 package failing on
+  Ubuntu 22.04 and the third from taking the floor down to 18.04:
+  - **The build runs in an Ubuntu 18.04 container by default.** 18.04 is the supported floor, and
     a cgo binary needs a glibc at least as new as the one it linked against. Compiled on this
     24.04 desktop the binary picks up glibc 2.38's C23 redirects — `__isoc23_sscanf`,
-    `__isoc23_strtol`, `__isoc23_strtoul` — which do not exist in 22.04's glibc 2.35, so `dpkg -i`
-    succeeded and the program then died with ``libc.so.6: version `GLIBC_2.38' not found``.
-    Linking against 2.35 is forward compatible, so one `.deb` covers 22.04 and everything later.
+    `__isoc23_strtol`, `__isoc23_strtoul` — which do not exist in 22.04's glibc 2.35 (never mind
+    18.04's 2.27), so `dpkg -i` succeeded and the program then died with
+    ``libc.so.6: version `GLIBC_2.38' not found``. Linking against 2.27 is forward compatible, so
+    one `.deb` covers 18.04 and everything later.
     `--local` builds with the host toolchain for checking the packaging, and must not be shipped.
-    The image installs no Go: the script bind-mounts the host's `GOROOT` (the Go toolchain is
-    statically linked, so it runs in 22.04's older userspace) plus the module cache read-only,
-    with `GOPROXY=off` and `--user` so the container needs no network and leaves nothing
-    root-owned behind. `go mod download` runs on the host first, where the cache is writable.
+    Go comes into the image from the upstream tarball at the host's own version (`GO_VERSION`
+    build-arg), not from apt — 18.04 ships Go 1.10 — and not bind-mounted from the host either,
+    since Ubuntu's golang packages symlink `src/`, `api/`, `misc/` and `test/` out to
+    `/usr/share/go-<ver>/`, so mounting `/usr/lib/go-<ver>` alone arrives with a dangling `src/`
+    and every build fails with "package unicode is not in std". The toolchain tarball is a static
+    Go binary, so it runs in 18.04's userspace regardless. The module cache is mounted read-only
+    with `GOPROXY=off` and `--user`, so the container needs no network and leaves nothing
+    root-owned behind; `go mod download` runs on the host first, where the cache is writable.
+    Bionic is still served by `archive.ubuntu.com` despite being out of standard support, so the
+    image needs no `old-releases.ubuntu.com` rewriting — if that changes, `sources.list` has to be
+    pointed there.
+  - **The packaged build is X11-only (`-tags x11`), which is what makes 18.04 reachable at all.**
+    The default build compiles glfw's X11 *and* Wayland backends and picks between them at runtime;
+    the Wayland one needs `WL_MARSHAL_FLAG_DESTROY`, added in libwayland 1.20 (2021), and 18.04 has
+    1.16 — the generated protocol headers do not compile there. Nor could such a binary be shipped
+    to 18.04 even if it did: `wayland-client` is a hard `NEEDED` entry in that build, and the symbol
+    is missing from 18.04's copy. With the tag, fyne's `wayland_csd_linux.go` (which is where the
+    `#cgo pkg-config: wayland-client` comes from) drops out for `wayland_csd_other.go`'s
+    `forcePlatform() == platformAuto`, and glfw picks the only platform it has. On a Wayland session
+    the app then runs through XWayland, so the visible cost is confined to that case: no native
+    Wayland surface, and `FYNE_PLATFORM=wayland` has nothing to select. A development `go build` is
+    deliberately left alone, so the dual-backend build is still what gets exercised day to day.
+    Also note EGL headers are needed even for the X11-only backend (glfw compiles `egl_context.c`
+    unconditionally) and on 18.04 they are a separate `libegl1-mesa-dev` rather than something
+    `libgl1-mesa-dev` pulls in.
   - **`Depends:` states the glibc floor, derived from the built binary** rather than hardcoded —
     `GLIBC_MIN` is the highest `GLIBC_x.y` symbol version `objdump -T` reports, emitted as
     `libc6 (>= x.y)`. This is what makes the failure mode impossible to reintroduce: a `--local`
     build on a newer machine now produces a package apt *refuses* to install on an older one,
     instead of one that installs and cannot start.
-  - **The dependency list covers dlopened libraries too.** `libGL.so.1` and
-    `libwayland-client.so.0` are hard ELF `NEEDED` entries, while glfw opens the X11, xkbcommon
-    and remaining Wayland libraries with `dlopen` at runtime, picking a set according to the
-    session — so both sets have to be installed. 1.0.1 listed neither `libwayland-client0` (a hard
-    requirement it got away with only because a desktop Ubuntu already has it) nor `libxext6`,
-    `libxrender1` or `libxkbcommon0`. `strings` on the binary lists the candidates.
+  - **The dependency list covers dlopened libraries too.** `libGL.so.1` is a hard ELF `NEEDED`
+    entry, while glfw opens the X11 libraries with `dlopen` at runtime, so `dpkg` cannot see them
+    and they have to be listed by hand — `strings` on the binary lists the candidates, `objdump -p`
+    the hard ones. 1.0.1 listed neither `libxext6` nor `libxrender1`, and got away with it only
+    because a desktop Ubuntu already has them. The Wayland and `libxkbcommon0` entries that used to
+    be here went with the `-tags x11` switch: that binary references neither (checked both ways),
+    and depending on packages 18.04 lacks or ships too old would have blocked the install for
+    nothing.
   - **The packaged build alone gets `-trimpath` and `-ldflags="-s -w"`**; a development
     `go build` keeps everything. `-s -w` drops the symbol table and DWARF: measured at 1.0.1 the
     binary went 31.4MB -> 23.2MB and the `.deb` 15.7MB -> 9.6MB, and panic traces still name

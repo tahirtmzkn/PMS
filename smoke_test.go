@@ -3,9 +3,11 @@ package main
 import (
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/test"
@@ -828,14 +830,48 @@ func TestInterfaceSourceIP(t *testing.T) {
 	}
 }
 
-// TestPingWaitArg pins the -W formatting: a sub-second timeout has to reach
-// ping as a fraction, not get truncated to whole seconds.
+// TestPingWaitArg pins the -W formatting: a whole number of seconds, rounded
+// *up*, on every input. -W is only the backstop for a ping that outlives its
+// budget (runBounded enforces the real deadline), so it has to be a value every
+// supported ping parses the same way — 18.04's reads it with strtoul and waits
+// forever on a fraction — and rounding up is what keeps it from ever firing
+// before the real deadline.
 func TestPingWaitArg(t *testing.T) {
-	cases := map[int]string{1000: "1", 1500: "1.5", 900: "0.9", 300: "0.3", 100: "0.1", 0: "0.001"}
+	cases := map[int]string{
+		0: "1", 1: "1", 100: "1", 300: "1", 900: "1", 1000: "1",
+		1001: "2", 1500: "2", 2000: "2", 2001: "3", 10000: "10",
+	}
 	for ms, want := range cases {
 		if got := pingWaitArg(ms); got != want {
 			t.Errorf("pingWaitArg(%d) = %q, want %q", ms, got, want)
 		}
+	}
+}
+
+// TestRunBounded covers the mechanism that replaced ping's own -W as the real
+// deadline: a process that outstays its budget is killed and reported as a
+// failure, and one that finishes inside it reports its own exit status. `sleep`
+// stands in for ping so the test needs no network and no ICMP permissions.
+func TestRunBounded(t *testing.T) {
+	start := time.Now()
+	if err := runBounded(exec.Command("sleep", "5"), 150*time.Millisecond); err == nil {
+		t.Error("a process that outran its budget reported success")
+	}
+	// Generous: the point is that it did not wait out the full 5s sleep.
+	if waited := time.Since(start); waited > 2*time.Second {
+		t.Errorf("budget not enforced, waited %v", waited)
+	}
+
+	if err := runBounded(exec.Command("true"), time.Minute); err != nil {
+		t.Errorf("process inside its budget reported %v", err)
+	}
+	if err := runBounded(exec.Command("false"), time.Minute); err == nil {
+		t.Error("a process that exited non-zero reported success")
+	}
+	// A command that cannot start at all is a failure, not a panic — pingOne
+	// hits this whenever `ping` is missing from PATH.
+	if err := runBounded(exec.Command("pinginfomanager-no-such-binary"), time.Minute); err == nil {
+		t.Error("unstartable command reported success")
 	}
 }
 
