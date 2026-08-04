@@ -49,9 +49,18 @@ func (pm *appState) buildSettingsPanel() *fyne.Container {
 
 	timeoutEntry := widget.NewEntry()
 	timeoutEntry.SetText(strconv.Itoa(pm.pingTimeout))
+	// The floor is 1ms rather than something defensible as a network timeout: how
+	// tight a reply window to accept is the operator's call, and a device that
+	// cannot answer inside it is exactly what the Fail column is for. Worth
+	// knowing where the mechanism itself gives out, though: runBounded times the
+	// budget from process start, so it also covers `ping`'s own setup before the
+	// echo leaves. Measured on this desktop against a LAN device that answers in
+	// well under a millisecond (~0.9ms wall per probe including spawn and exit),
+	// 2ms still answered 20/20 while 1ms dropped one of 20 — at that point the
+	// budget is being spent on ping starting up rather than on the network.
 	timeoutEntry.OnChanged = func(s string) {
 		n, err := strconv.Atoi(strings.TrimSpace(s))
-		if err != nil || n < 100 || n > 10000 {
+		if err != nil || n < 1 || n > 10000 {
 			return
 		}
 		pm.pingTimeout = n

@@ -45,7 +45,9 @@ off.
 
 `smoke_test.go` is the only test: it builds the whole UI against `test.NewApp()` (headless, no
 window opens) and exercises add/remove/sort/resize-drag/formatting plus the config round trip
-(pointed at `t.TempDir()`, never the real `~/.config/pinginfomanager`).
+(pointed at `t.TempDir()`, never the real `~/.config/pinginfomanager`). `appState.probe` holds
+`pingOne` so a test can pin an outcome without forking a `ping` or needing a network —
+`TestTickSendCadence` and `TestApplyProbeResult` use it to cover the send cadence and the counters.
 
 It is expected to stay clean under `go test -race ./...`, which constrains how tests drive
 hostname lookups. `test.NewApp`'s driver runs `fyne.Do` *inline on the calling goroutine*
@@ -70,16 +72,28 @@ sudo apt install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
   `Hostname`, plus running success/fail/total counters and `LastResult`. `Name` and `Hostname` are
   separate on purpose: the name box is optional and its text is the only thing the Name column
   ever shows, while `Hostname` is always filled in from the device itself.
+  **`Total` counts requests *sent*, not results collected** — one per device per interval, written
+  in a single pass in `tick`, so every device's Total advances at the same instant however the
+  devices differ in reachability. `Success`/`Fail` are the outcomes and necessarily land later and
+  at different moments (a reply comes back in ~1ms; a failure is only known a whole timeout later).
+  `Resolved()` is `Success + Fail`, and `Total - Resolved()` is what is in flight — which is why
+  Loss divides by `Resolved()`, see `formatLoss`.
 - `ping.go` — `pingOne` shells out to the system `ping` binary
-  (`ping -n -I <interface> -c 1 -W <whole_sec> <ip>`). `runCycle` fans a ping out to every
-  device concurrently, calling `onResult` as each device finishes and `onDone` once all have.
-  `onResult` hands back the `*Device`, never its list index — the UI is free to reorder its list
-  (sort, drag) while a cycle is still in flight. Three details are load-bearing for cycle time,
-  all measured against a list of unreachable hosts:
+  (`ping -n -I <interface> -c 1 -W <whole_sec> <ip>`). `probeDevices` fans a request out to every
+  device concurrently and calls `onResult` with `(*Device, ok)` as each finishes. `onResult` hands
+  back the `*Device`, never its list index — the UI is free to reorder its list (sort, drag) while a
+  request is still in flight. It deliberately **does not touch the counters**: rounds overlap, so
+  two goroutines could otherwise be incrementing one device's `Success` at once. Every counter is
+  written on the UI goroutine instead (`tick` / `applyProbeResult`). Three details are load-bearing
+  for round time, all measured against a list of unreachable hosts:
   - `maxConcurrentPings` is 256, a backstop against forking absurd numbers of processes rather
     than a throttle. At its old value of 10 (copied from the Python version's QThreadPool) a
-    40-device cycle took four ~1s waves — 4.0s instead of 1.0s — and on screen that read as the
-    devices being pinged one after another.
+    40-device round took four ~1s waves — 4.0s instead of 1.0s — and on screen that read as the
+    devices being pinged one after another. The semaphore (`pingSem`) is **package-level**, not
+    per-round: rounds overlap whenever the timeout outlasts the interval, so a per-round semaphore
+    would have stopped bounding anything. Note it bounds *processes*, not sends — `Total` counts a
+    request when `tick` issues it, so a list long enough to queue on the semaphore has its actual
+    spawns lag its Totals.
   - the semaphore is acquired *inside* each goroutine, not in the launch loop, so process spawns
     happen in parallel instead of queueing behind each other.
   - **the timeout is enforced by `runBounded`, not by ping's `-W`**, and `-W` is a whole number of
@@ -94,13 +108,17 @@ sudo apt install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
   from *after* the fork/exec is the whole reason it isn't `exec.CommandContext`: a context deadline
   has to include process spawn, so it needs a margin, and any margin is wrong in one direction or
   the other — too tight and a busy machine's slow spawn kills a ping before the device ever got its
-  full timeout (a device that is up reads as down), too loose and every unanswered host holds the
-  cycle open for the slack. Cycle wall time is therefore ~`timeout` + ~1ms regardless of device
-  count, verified identically on 24.04 and in an 18.04 container (100ms → 101ms, 300ms → 301ms,
-  1500ms → 1501ms). Killing racing `Wait` is safe: `os.Process` marks itself done under a lock as
-  it is reaped, so the loser returns `ErrProcessDone` rather than signalling a recycled pid.
-- `ui.go` — `appState` holds all app state (devices, settings, running/isPinging flags, sort
-  column/direction, the ticker's stop channel) and builds the window content: a single-row
+  full timeout (a device that is up reads as down), too loose and every unanswered host holds its
+  goroutine open for the slack. One probe therefore costs ~`timeout` + ~1ms, verified identically on
+  24.04 and in an 18.04 container (100ms → 101ms, 300ms → 301ms, 1500ms → 1501ms). Killing racing
+  `Wait` is safe: `os.Process` marks itself done under a lock as it is reaped, so the loser returns
+  `ErrProcessDone` rather than signalling a recycled pid. Because the budget starts at process
+  start it also covers ping's own setup, which is what bounds a *very* low timeout in practice:
+  against a LAN device answering in well under a millisecond, 2ms answered 20/20 while 1ms dropped
+  one of 20.
+- `ui.go` — `appState` holds all app state (devices, settings, the `running` flag, the probe
+  generation, sort column/direction, the ticker's stop channel) and builds the window content: a
+  single-row
   toolbar (logo, add-device controls, Start/Clear pinned right via a spacer), the always-visible
   settings row, then the sortable header and table. Rows are hand-built widgets (a
   `canvas.Rectangle` background + a `container.NewGridWithColumns` grid, stacked), not a
@@ -110,10 +128,10 @@ sudo apt install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
   index**: `deviceRow.device` plus `indexOf`/`rowFor` mean every row callback resolves its position
   at click/update time, so reordering or removing can't leave a control aimed at the wrong device.
   `refreshRows` fully rebuilds all rows after structural changes (add/remove/clear/stop/sort);
-  `updateRowResult` is the cheap per-cycle path that only touches one row's counters/color, and
-  it goes through `setLabel`/`colorRow`'s equality guards — `Label.SetText` and
-  `Rectangle.Refresh` both repaint unconditionally, and on a steady list most of a cycle's
-  counters and every row color are unchanged.
+  `updateRowResult` is the cheap path that only touches one row's counters/color, called both when a
+  request goes out (Total) and when its outcome lands (Success/Fail/Loss/color), and it goes through
+  `setLabel`/`colorRow`'s equality guards — `Label.SetText` and `Rectangle.Refresh` both repaint
+  unconditionally, and on a steady list most of a round's counters and every row color are unchanged.
   Each row ends with a reorder grip (`dragHandle`, see `resizer.go`) and the remove button.
   Dragging the grip runs `dragRow`, which accumulates vertical travel in `dragOffset`: the row is
   drawn at that offset so it follows the pointer, and once the travel covers one `rowStride()`
@@ -142,15 +160,21 @@ sudo apt install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
   Column headers (`newHeaderButton`) are plain `widget.Button`s that call `sortBy`, which toggles
   ascending/descending on repeat clicks of the same column and re-sorts `pm.devices` in place with
   `sort.SliceStable` (IP sorts numerically via `ipLess`/`net.ParseIP`, not lexicographically).
-  The seven columns are Name, Hostname, IP, Success, Fail, Total, Loss, indexed by position in
-  `colWidths` — inserting or moving one means renumbering the `columnCell` calls in *both* the
-  header row and `newRow`, and their default widths have to keep the row inside the 1200px default
-  window or the trailing grip/remove cells get pushed off-screen (the table only scrolls vertically).
-  Success/Fail/Total are raw counts; the derived **Loss** column (`formatLoss`) shows
-  `fail/total` as a percentage — one decimal, trailing `.0` trimmed, so a single failure in a long
-  run doesn't round to `%0`, and `-` before a device's first ping rather than a misleading `%0`.
-  Sorting Loss uses the ratio (`lossRatio`), not the fail count, with never-pinged devices keyed
-  to `-1` so they group together instead of tying with genuinely 0%-loss devices.
+  The seven columns are Name, Hostname, IP, Total, Success, Fail, Loss, indexed by position in
+  `colWidths` — the `columnCell` index is both the display position and the width slot, so inserting
+  or moving one means renumbering those calls in *both* the header row and `newRow` (and keeping the
+  two lists in the same order as each other). Their default widths have to keep the row inside the
+  1200px default window or the trailing grip/remove cells get pushed off-screen (the table only
+  scrolls vertically). Total leads the three counts because it is the one that advances for every
+  device at the same instant — see `device.go` — so reading down it is how you see the run is even.
+  Total/Success/Fail are raw counts; the derived **Loss** column (`formatLoss`) shows
+  `fail/resolved` as a percentage — one decimal, trailing `.0` trimmed, so a single failure in a long
+  run doesn't round to `%0`, and `-` before anything has been measured rather than a misleading `%0`.
+  The denominator is `Device.Resolved()`, **not `Total`**: Total counts requests as they go out, so
+  dividing by it would drop the figure the instant each request was sent and lift it back when the
+  outcome arrived — a device losing everything would read `%92.3` for most of each second and `%100`
+  in between. Sorting Loss uses the ratio (`lossRatio`), not the fail count, with devices that have
+  nothing resolved keyed to `-1` so they group together instead of tying with genuinely 0%-loss ones.
   The **Name** column is only ever the text from the (optional) name box, or `unknownName`
   ("Unknown") when it was left blank — it is never written from SNMP. The separate **Hostname**
   column is what the device calls itself: every added device goes up with
@@ -223,7 +247,10 @@ sudo apt install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
   validated `widget.Entry` fields for interval/timeout apply on every valid `OnChanged`; interface
   is a `widget.Select` populated once from `net.Interfaces()` rather than free text. Changing the
   interval or interface while running calls `startTicker()` again so it takes effect on the next
-  cycle instead of requiring a manual Stop/Start. The Theme `Select` (System/Light/Dark) calls
+  round instead of requiring a manual Stop/Start. Timeout accepts **1–10000 ms** — the floor is not
+  a defensible network timeout but the operator's call, and the comment there records where the
+  mechanism itself gives out (2ms answered 20/20 against a LAN device, 1ms dropped one of 20, since
+  the budget starts at process start and so covers ping's own setup). The Theme `Select` (System/Light/Dark) calls
   `applyThemeMode` + `persistConfig`, and sets its initial value by **assigning `Selected`, not
   `SetSelected`** — this is load-bearing: `SetSelected` fires `OnChanged`, and `buildUI` runs before
   the saved device list has been restored, so the callback's `persistConfig` would write an empty
@@ -344,11 +371,22 @@ Key invariants:
   `app.SetMetadata(... Migrations: map[string]bool{"fyneDo": true})` in `main.go`). Any code that
   touches `appState` fields or Fyne widgets from a goroutine you spawn must go through
   `fyne.Do(...)`. Concretely: the ticker goroutine only calls `fyne.Do(func(){ pm.tick() })`, so
-  `tick()` itself (which reads/writes `appState` fields) always runs on the main goroutine; the
-  actual ping fan-out (`runCycle`, including its blocking semaphore) is launched via `go
-  runCycle(...)` from inside `tick()` so it runs on a background goroutine and never blocks the
-  UI, and its `onResult`/`onDone` callbacks wrap their bodies in `fyne.Do` to marshal back safely.
-- A ping cycle is skipped (not queued) if the previous one hasn't finished (`isPinging` guard),
-  matching the original Python behavior.
+  `tick()` itself (which reads/writes `appState` fields, including every device's `Total`) always
+  runs on the main goroutine; the actual ping fan-out (`probeDevices`, including its blocking
+  semaphore) is launched via `go probeDevices(...)` from inside `tick()` so it runs on background
+  goroutines and never blocks the UI, and its `onResult` callback wraps `applyProbeResult` in
+  `fyne.Do` to marshal back safely. **`tick` and `applyProbeResult` are the only writers of a
+  device's counters**, and since both run on the UI goroutine they cannot race — which is what makes
+  overlapping rounds reporting on the same device safe.
+- **The interval is the send cadence and nothing throttles it.** Every interval each device gets
+  exactly one echo request, whether or not the previous one has been answered; the timeout only
+  decides how long a reply stays valid. Rounds therefore overlap whenever the timeout outlasts the
+  interval (interval 1s + timeout 5000ms means five requests outstanding per device — verified: 10
+  requests sent in 10.4s, 5 resolved). This replaced an `isPinging` guard inherited from the Python
+  version, which skipped a tick while a round was still in flight and so let the timeout silently
+  change the rate: at the defaults (1s interval, 1000ms timeout) one unreachable device stretched the
+  round past the interval and every second tick was dropped, so *every* device in the list — the
+  reachable ones included — was probed once per two seconds (measured: 5 requests in 10.4s instead of
+  10). `TestTickSendCadence` pins this.
 - Row background only reflects last-ping status while `running` is true; otherwise it's
   `color.Transparent` (not a hardcoded white), so it looks correct in both light and dark themes.

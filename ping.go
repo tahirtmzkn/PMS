@@ -3,17 +3,22 @@ package main
 import (
 	"os/exec"
 	"strconv"
-	"sync"
 	"time"
 )
 
-// maxConcurrentPings caps how many `ping` subprocesses run at once. A cycle is
+// maxConcurrentPings caps how many `ping` subprocesses run at once. A round is
 // meant to probe every device at the same instant, so this is a backstop
 // against forking absurd numbers of processes, not a throttle. It used to be 10
 // (copied from the Python version's QThreadPool) — which meant a 40-device list
-// needed four ~1s waves to finish one cycle, and on screen that read as the
+// needed four ~1s waves to finish one round, and on screen that read as the
 // devices being pinged one after another.
 const maxConcurrentPings = 256
+
+// pingSem bounds concurrency across *all* rounds, not within one. Rounds
+// overlap whenever the timeout outlasts the interval — a request goes out every
+// interval regardless of whether the previous one has been answered — so a
+// semaphore created per round would have stopped bounding anything.
+var pingSem = make(chan struct{}, maxConcurrentPings)
 
 // pingWaitArg renders timeoutMs as ping's -W value: whole seconds, rounded up,
 // never below 1. It is deliberately *not* the real timeout — runBounded below
@@ -74,38 +79,27 @@ func pingOne(ip, iface string, timeoutMs int) bool {
 	return runBounded(cmd, time.Duration(timeoutMs)*time.Millisecond) == nil
 }
 
-// runCycle pings every device concurrently (bounded by maxConcurrentPings),
-// invoking onResult as each device's ping completes and onDone once all have.
-// onResult identifies the device by pointer, not by list position: the UI can
-// reorder its list (sort, drag) while a cycle is still in flight.
-func runCycle(devices []*Device, iface string, timeoutMs int, onResult func(d *Device), onDone func()) {
-	sem := make(chan struct{}, maxConcurrentPings)
-	var wg sync.WaitGroup
-
+// probeDevices sends one echo request to every device at once (bounded by
+// pingSem) and reports each outcome through onResult as it arrives.
+//
+// It deliberately does not touch the devices' counters. Rounds overlap, so two
+// goroutines could otherwise be incrementing one device's Success at the same
+// moment; instead every counter is written on the UI goroutine — Total by
+// appState.tick as the requests go out, Success/Fail by appState.applyProbeResult
+// once onResult has marshalled the outcome back. onResult identifies the device
+// by pointer, not by list position, so the UI is free to sort, drag or remove
+// while a request is still in flight.
+// probe is normally pingOne; appState holds it as a field so tests can stub it.
+func probeDevices(devices []*Device, iface string, timeoutMs int, probe func(ip, iface string, timeoutMs int) bool, onResult func(d *Device, ok bool)) {
 	for _, device := range devices {
-		wg.Add(1)
 		// The semaphore is taken inside the goroutine, not in this loop: taking
 		// it here serialised the process spawns behind each other, staggering
-		// the start of a large cycle by milliseconds per device.
+		// the start of a large round by milliseconds per device.
 		go func(d *Device) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+			pingSem <- struct{}{}
+			defer func() { <-pingSem }()
 
-			ok := pingOne(d.IP, iface, timeoutMs)
-			d.Total++
-			d.LastResult = ok
-			if ok {
-				d.Success++
-			} else {
-				d.Fail++
-			}
-			onResult(d)
+			onResult(d, probe(d.IP, iface, timeoutMs))
 		}(device)
 	}
-
-	go func() {
-		wg.Wait()
-		onDone()
-	}()
 }

@@ -65,10 +65,10 @@ func TestSmokeBuildUI(t *testing.T) {
 		t.Errorf("formatLoss unpinged = %q", got)
 	}
 
-	// Loss sorts on the fail/total ratio, not the raw fail count, and
-	// never-pinged devices stay grouped ahead of measured ones.
-	pm.devices[0].Fail, pm.devices[0].Total = 1, 10 // 10%
-	pm.devices[1].Fail, pm.devices[1].Total = 5, 10 // 50%
+	// Loss sorts on the fail/resolved ratio, not the raw fail count, and devices
+	// with nothing measured stay grouped ahead of measured ones.
+	pm.devices[0].Fail, pm.devices[0].Success, pm.devices[0].Total = 1, 9, 10 // 10%
+	pm.devices[1].Fail, pm.devices[1].Success, pm.devices[1].Total = 5, 5, 10 // 50%
 	<-pm.addDevice("10.0.0.9", "Unpinged")
 	pm.sortBy(sortLoss)
 	if pm.devices[0].Name != "Unpinged" || pm.devices[2].Fail != 5 {
@@ -897,12 +897,139 @@ func TestStatusLine(t *testing.T) {
 	<-pm.addDevice("10.0.0.2", "b")
 	<-pm.addDevice("10.0.0.3", "c")
 	pm.running = true
-	pm.devices[0].Total, pm.devices[0].LastResult = 3, true
-	pm.devices[1].Total, pm.devices[1].LastResult = 3, false
-	// devices[2] never pinged -> pending, not "down"
+	pm.devices[0].Total, pm.devices[0].Success, pm.devices[0].LastResult = 3, 3, true
+	pm.devices[1].Total, pm.devices[1].Fail, pm.devices[1].LastResult = 3, 3, false
+	// devices[2] has nothing resolved -> pending, not "down". Total alone does
+	// not settle that any more: it counts requests sent, so a device whose first
+	// request is still in flight has a Total of 1 and no outcome.
+	pm.devices[2].Total = 1
 	pm.refreshStatus()
 	want := "Monitoring  ·  3 devices  ·  1 up  ·  1 down  ·  1 pending"
 	if got := pm.statusLabel.Text; got != want {
 		t.Errorf("running status = %q, want %q", got, want)
+	}
+}
+
+// TestTickSendCadence pins the rule the interval and timeout settings claim: one
+// request per device per tick, never skipped for a round still in flight. Before
+// this, a tick arriving while the previous round was unfinished was dropped, so a
+// timeout at or above the interval quietly halved the real send rate for every
+// device in the list.
+//
+// The stub parks every request on a channel that is never closed, so no outcome
+// lands and nothing but tick itself touches the counters — which is also what
+// keeps this race-free under test.NewApp, whose fyne.Do runs inline on the
+// calling goroutine (see the notes in CLAUDE.md).
+func TestTickSendCadence(t *testing.T) {
+	a := test.NewApp()
+	defer a.Quit()
+
+	win := a.NewWindow(appDisplayName)
+	pm := newAppState(win, fyne.NewStaticResource("trash.png", trashPNG))
+	win.SetContent(pm.buildUI(fyne.NewStaticResource("ping-pong.png", pingPongPNG)))
+	pm.lookupName = func(ip, iface string) string { return "" }
+
+	const rounds = 3
+	started := make(chan string, rounds*3)
+	forever := make(chan struct{})
+	pm.probe = func(ip, iface string, timeoutMs int) bool {
+		started <- ip
+		<-forever // outlives every tick below, exactly like a timeout > interval
+		return false
+	}
+
+	<-pm.addDevice("10.0.0.1", "reachable")
+	<-pm.addDevice("10.0.0.2", "dead")
+	<-pm.addDevice("10.0.0.3", "also dead")
+
+	for i := 0; i < rounds; i++ {
+		pm.tick()
+	}
+
+	// Every device was asked in every round, not just the ones that answer fast.
+	// The fan-out is asynchronous, so count the arrivals rather than sampling.
+	perIP := map[string]int{}
+	for i := 0; i < rounds*len(pm.devices); i++ {
+		select {
+		case ip := <-started:
+			perIP[ip]++
+		case <-time.After(10 * time.Second):
+			t.Fatalf("only %d of %d requests went out: %v", i, rounds*len(pm.devices), perIP)
+		}
+	}
+	for _, d := range pm.devices {
+		if perIP[d.IP] != rounds {
+			t.Errorf("%s: %d requests over %d rounds, want %d", d.IP, perIP[d.IP], rounds, rounds)
+		}
+	}
+
+	for _, d := range pm.devices {
+		if d.Total != rounds {
+			t.Errorf("%s: total = %d after %d ticks, want %d (a tick was skipped)",
+				d.IP, d.Total, rounds, rounds)
+		}
+		// Nothing has come back, so the outcome columns must still be empty and
+		// Loss must not claim a measurement.
+		if d.Success != 0 || d.Fail != 0 {
+			t.Errorf("%s: success/fail = %d/%d with every request in flight", d.IP, d.Success, d.Fail)
+		}
+		if got := formatLoss(d.Fail, d.Resolved()); got != "-" {
+			t.Errorf("%s: loss = %q with nothing resolved, want %q", d.IP, got, "-")
+		}
+	}
+	if got := pm.statusLabel.Text; got != "Stopped  ·  3 devices" {
+		t.Errorf("status = %q", got)
+	}
+}
+
+// TestApplyProbeResult covers the other half: outcomes are recorded on the UI
+// goroutine as they arrive, Total is left alone (tick already counted the
+// request), and a result from before a Clear is dropped rather than added to the
+// fresh count.
+func TestApplyProbeResult(t *testing.T) {
+	a := test.NewApp()
+	defer a.Quit()
+
+	win := a.NewWindow(appDisplayName)
+	pm := newAppState(win, fyne.NewStaticResource("trash.png", trashPNG))
+	win.SetContent(pm.buildUI(fyne.NewStaticResource("ping-pong.png", pingPongPNG)))
+	pm.lookupName = func(ip, iface string) string { return "" }
+	pm.probe = func(ip, iface string, timeoutMs int) bool { return true }
+
+	<-pm.addDevice("10.0.0.1", "a")
+	d := pm.devices[0]
+	d.Total = 2 // as if tick had sent two requests
+
+	pm.applyProbeResult(d, true, pm.probeGen)
+	pm.applyProbeResult(d, false, pm.probeGen)
+	if d.Success != 1 || d.Fail != 1 || d.Total != 2 {
+		t.Errorf("after two outcomes: success=%d fail=%d total=%d, want 1/1/2", d.Success, d.Fail, d.Total)
+	}
+	if d.LastResult {
+		t.Error("LastResult should reflect the most recent outcome (a failure)")
+	}
+	if got := pm.rowFor(d).loss.Text; got != "%50" {
+		t.Errorf("loss = %q, want %q", got, "%50")
+	}
+
+	// A request in flight across a Clear: its Total was zeroed with everything
+	// else, so its outcome must not survive into the new count.
+	stale := pm.probeGen
+	pm.clearStats()
+	pm.applyProbeResult(d, false, stale)
+	if d.Success != 0 || d.Fail != 0 || d.Total != 0 {
+		t.Errorf("stale outcome landed after Clear: success=%d fail=%d total=%d", d.Success, d.Fail, d.Total)
+	}
+	// The current generation still counts.
+	pm.applyProbeResult(d, true, pm.probeGen)
+	if d.Success != 1 {
+		t.Errorf("post-Clear outcome dropped: success=%d, want 1", d.Success)
+	}
+
+	// A device removed while its request was in flight is simply forgotten.
+	pm.removeDevice(0)
+	pm.applyProbeResult(d, false, pm.probeGen)
+	if d.Fail != 0 {
+		t.Errorf("outcome recorded for a removed device: fail=%d", d.Fail)
 	}
 }

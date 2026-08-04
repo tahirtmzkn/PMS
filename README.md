@@ -12,9 +12,11 @@ as a single binary and installs from a `.deb` like any other desktop app.
 
 Features
 -----------------------
-- Keeps an eye on a list of devices: one ping each per cycle, with live Success, Fail, Total
+- Keeps an eye on a list of devices: one ping each per interval, with live Total, Success, Fail
   and Loss counters, and each row green while its last ping answered and red while it didn't.
-- The whole list is pinged at once, so a cycle takes about as long as the timeout no matter how
+- The interval is the send rate and nothing throttles it — 10 seconds at a 1-second interval is 10
+  requests per device, reachable or not. The timeout only decides how long a reply stays valid.
+- The whole list is pinged at once, so a round takes about as long as the timeout no matter how
   many devices are on it.
 - Two name columns: **Name** is your own label for the device (optional — blank rows read
   `Unknown`), while **Hostname** is filled in automatically from the device's own SNMP hostname —
@@ -117,7 +119,7 @@ Using it
    field). The name is your own label and goes in the **Name** column; leave it blank and the row
    reads `Unknown` there. Either way the **Hostname** column shows `Resolving…` for a moment and
    then the device's own SNMP hostname, or `Empty` if it didn't answer.
-3. **Start** begins the cycles, **Stop** ends them, **Clear** zeroes every counter without
+3. **Start** begins pinging, **Stop** ends it, **Clear** zeroes every counter without
    touching the list. Start also re-asks every device for its hostname, so the **Hostname**
    column goes back to `Resolving…` for a moment and then shows what the devices say now — a
    Stop/Start is how you refresh those names after swapping or renaming a device.
@@ -128,12 +130,18 @@ Settings:
 
 | field | default | accepted |
 | --- | --- | --- |
-| Interval (s) | 1 | 1 and up — how long between cycles |
-| Timeout (ms) | 1000 | 100–10000 — how long one ping waits for a reply |
+| Interval (s) | 1 | 1 and up — one request per device, this often |
+| Timeout (ms) | 1000 | 1–10000 — how long a reply stays valid |
 | Interface | `enp3s0` | the machine's interfaces, listed from the OS |
 | Theme | System | System, Light, Dark |
 
 Out-of-range input is simply not applied, so a half-typed value never takes effect.
+
+How tight a reply window to accept is your call, which is why the timeout goes down to 1 ms. Below
+a couple of milliseconds you are no longer measuring the network, though: the budget is timed from
+when the `ping` process starts, so it also covers that process getting as far as sending. Against a
+LAN device answering in well under a millisecond, 2 ms answered 20 of 20 requests here while 1 ms
+dropped one of them.
 
 **Theme** takes effect immediately and is remembered. `System` follows the desktop's own light/dark
 preference (and `FYNE_THEME=light|dark` if you set it), which is the default; `Light` and `Dark`
@@ -177,12 +185,25 @@ change to the list replaces it).
 
 How it works
 -----------------------
-**Pinging.** Each device gets one `ping -n -I <interface> -c 1 -W <timeout>` per cycle. The
-whole list goes out concurrently rather than in waves, so cycle time tracks the timeout, not
-the device count. A cycle is *skipped* rather than queued if the previous one hasn't finished
-yet, so a list full of unreachable hosts can't build up a backlog. Rows are bound to devices
-by identity, not by list position, so sorting, dragging or removing a device mid-cycle can
-never land one device's counters on another's row.
+**Pinging.** Every **Interval**, each device gets exactly one echo request
+(`ping -n -I <interface> -c 1`). That cadence is fixed: nothing waits for the previous request to be
+answered first, so 10 seconds at a 1-second interval is 10 requests per device, whether the device
+answers instantly or not at all. **Timeout** is a separate thing — how long a reply stays valid.
+A request answered inside it counts as Success, one that isn't counts as Fail.
+
+Set a timeout longer than the interval and requests simply overlap, exactly as `ping` itself does:
+at a 1-second interval and a 5-second timeout each device has five requests outstanding.
+
+That is also why **Total** counts requests *sent* rather than results collected. Every device's
+Total advances at the same instant, so the column stays level across the table; Success and Fail
+follow as the replies do, which for an unreachable device means one timeout later. **Loss** is
+measured over the requests that have an outcome, not over Total, so it doesn't dip and recover
+every time a request goes out.
+
+The whole list goes out concurrently rather than in waves, so a round takes about as long as the
+timeout no matter how many devices are on it. Rows are bound to devices by identity, not by list
+position, so sorting, dragging or removing a device while its request is in flight can never land
+one device's counters on another's row.
 
 **Hostnames.** Every added device — and every device on the list each time a run is started —
 gets, in the background:

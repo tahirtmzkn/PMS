@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -88,8 +89,12 @@ type appState struct {
 	themeMode themeMode
 
 	running    bool
-	isPinging  bool
 	tickerStop chan struct{}
+
+	// probeGen counts Clears. A request in flight when Clear is pressed was
+	// counted in the Total it just zeroed, so applyProbeResult drops any outcome
+	// stamped with an older generation instead of adding it to a fresh count.
+	probeGen uint64
 
 	rows          []*deviceRow
 	rowsContainer *fyne.Container
@@ -107,6 +112,11 @@ type appState struct {
 	// lookupName resolves a device's name from its IP (SNMP sysName). A field
 	// rather than a direct call so tests can stub it instead of shelling out.
 	lookupName func(ip, iface string) string
+
+	// probe sends one echo request and reports whether it was answered inside
+	// the timeout. A field for the same reason as lookupName: a test can pin an
+	// outcome without forking a `ping` and without needing a network.
+	probe func(ip, iface string, timeoutMs int) bool
 
 	// hostnameGen counts hostname refreshes. Every lookup captures the
 	// generation it was started in and its answer is dropped if a later refresh
@@ -160,6 +170,7 @@ func newAppState(win fyne.Window, trashIcon fyne.Resource) *appState {
 		rowOffsets: map[fyne.CanvasObject]float32{},
 		rowAnims:   map[fyne.CanvasObject]*fyne.Animation{},
 		lookupName: snmpSysName,
+		probe:      pingOne,
 	}
 	pm.rowsContainer = container.New(rowsLayout{
 		slots:  pm.slotObjects,
@@ -271,9 +282,9 @@ func (pm *appState) buildUI(pingPongIcon fyne.Resource) fyne.CanvasObject {
 		pm.columnCell(0, pm.nameHeaderBtn), newResizer(0),
 		pm.columnCell(1, pm.hostHeaderBtn), newResizer(1),
 		pm.columnCell(2, pm.ipHeaderBtn), newResizer(2),
-		pm.columnCell(3, pm.successHeader), newResizer(3),
-		pm.columnCell(4, pm.failHeaderBtn), newResizer(4),
-		pm.columnCell(5, pm.totalHeaderBtn), newResizer(5),
+		pm.columnCell(3, pm.totalHeaderBtn), newResizer(3),
+		pm.columnCell(4, pm.successHeader), newResizer(4),
+		pm.columnCell(5, pm.failHeaderBtn), newResizer(5),
 		pm.columnCell(6, pm.lossHeaderBtn), newResizer(6),
 		layout.NewSpacer(),
 		// Two blanks: one per trailing button cell (grip, remove), so the
@@ -345,7 +356,9 @@ func (pm *appState) refreshStatus() {
 	up, down, pending := 0, 0, 0
 	for _, d := range pm.devices {
 		switch {
-		case d.Total == 0:
+		// Resolved, not Total: a device whose first request is still in flight
+		// has a Total of 1 already but nothing measured yet.
+		case d.Resolved() == 0:
 			pending++
 		case d.LastResult:
 			up++
@@ -469,6 +482,9 @@ func (pm *appState) removeDevice(idx int) {
 }
 
 func (pm *appState) clearStats() {
+	// Requests still in flight were counted in the Totals being zeroed here, so
+	// their outcomes must not land on the fresh count — see applyProbeResult.
+	pm.probeGen++
 	for _, d := range pm.devices {
 		d.Success, d.Fail, d.Total = 0, 0, 0
 	}
@@ -537,7 +553,7 @@ func (pm *appState) newRow(device *Device) *deviceRow {
 	successLbl := widget.NewLabel(strconv.Itoa(device.Success))
 	failLbl := widget.NewLabel(strconv.Itoa(device.Fail))
 	totalLbl := widget.NewLabel(strconv.Itoa(device.Total))
-	lossLbl := widget.NewLabel(formatLoss(device.Fail, device.Total))
+	lossLbl := widget.NewLabel(formatLoss(device.Fail, device.Resolved()))
 
 	removeBtn := widget.NewButtonWithIcon("", pm.trashIcon, func() {
 		pm.removeDevice(pm.indexOf(device))
@@ -553,9 +569,9 @@ func (pm *appState) newRow(device *Device) *deviceRow {
 		pm.columnCell(0, nameLbl), blankGap(resizerWidth),
 		pm.columnCell(1, hostLbl), blankGap(resizerWidth),
 		pm.columnCell(2, ipLbl), blankGap(resizerWidth),
-		pm.columnCell(3, successLbl), blankGap(resizerWidth),
-		pm.columnCell(4, failLbl), blankGap(resizerWidth),
-		pm.columnCell(5, totalLbl), blankGap(resizerWidth),
+		pm.columnCell(3, totalLbl), blankGap(resizerWidth),
+		pm.columnCell(4, successLbl), blankGap(resizerWidth),
+		pm.columnCell(5, failLbl), blankGap(resizerWidth),
 		pm.columnCell(6, lossLbl), blankGap(resizerWidth),
 		layout.NewSpacer(),
 		fixedWidth(removeColWidth, handle),
@@ -814,7 +830,7 @@ func (pm *appState) updateRowResult(device *Device) {
 	setLabel(row.success, strconv.Itoa(device.Success))
 	setLabel(row.fail, strconv.Itoa(device.Fail))
 	setLabel(row.total, strconv.Itoa(device.Total))
-	setLabel(row.loss, formatLoss(device.Fail, device.Total))
+	setLabel(row.loss, formatLoss(device.Fail, device.Resolved()))
 	pm.colorRow(row, device)
 }
 
@@ -829,26 +845,32 @@ func setLabel(l *widget.Label, text string) {
 	l.SetText(text)
 }
 
-// formatLoss shows failed pings as a share of the total, e.g. "%12.5". One
-// decimal is kept (a trailing ".0" is dropped) so a single failure in a long
-// run doesn't round away to "%0". A device with no pings yet shows "-" rather
-// than "%0", which would claim a clean link before anything was measured.
-func formatLoss(fail, total int) string {
-	if total == 0 {
+// formatLoss shows failed requests as a share of the *resolved* ones, e.g.
+// "%12.5". One decimal is kept (a trailing ".0" is dropped) so a single failure
+// in a long run doesn't round away to "%0". A device with nothing measured yet
+// shows "-" rather than "%0", which would claim a clean link before anything was
+// known.
+//
+// The denominator is Device.Resolved rather than Total because Total counts
+// requests as they go out: measuring against it would drop the figure the instant
+// each request was sent and lift it back when the outcome arrived — a device
+// losing everything would read %92.3 for most of each second and %100 in between.
+func formatLoss(fail, resolved int) string {
+	if resolved == 0 {
 		return "-"
 	}
-	pct := math.Round(float64(fail)/float64(total)*1000) / 10
+	pct := math.Round(float64(fail)/float64(resolved)*1000) / 10
 	return "%" + strconv.FormatFloat(pct, 'f', -1, 64)
 }
 
-// lossRatio is the sort key for the Loss column. Never-pinged devices get -1
-// so they group together ahead of every measured device instead of tying with
-// the 0%-loss ones.
+// lossRatio is the sort key for the Loss column. Devices with nothing measured
+// yet get -1 so they group together ahead of every measured device instead of
+// tying with the 0%-loss ones.
 func lossRatio(d *Device) float64 {
-	if d.Total == 0 {
+	if d.Resolved() == 0 {
 		return -1
 	}
-	return float64(d.Fail) / float64(d.Total)
+	return float64(d.Fail) / float64(d.Resolved())
 }
 
 // newHeaderButton makes a column header that sorts the table by col when
@@ -961,10 +983,13 @@ func (pm *appState) start() []<-chan struct{} {
 	return done
 }
 
+// stop ends the send cadence. Requests already in flight are left to finish and
+// their outcomes still land: their Totals were counted when they went out, so
+// dropping them would leave Success+Fail permanently short. The last of them
+// resolves within one timeout of pressing Stop.
 func (pm *appState) stop() {
 	pm.running = false
 	pm.stopTicker()
-	pm.isPinging = false
 	pm.toggleBtn.SetText("Start")
 	pm.toggleBtn.Importance = widget.SuccessImportance
 	pm.toggleBtn.Refresh()
@@ -1002,29 +1027,79 @@ func (pm *appState) stopTicker() {
 	}
 }
 
-// tick runs on the Fyne main goroutine (invoked via fyne.Do from the ticker
-// goroutine), so reading/snapshotting appState fields here is race-free. The
-// actual ping fan-out happens on a background goroutine so a large device
-// list's blocking semaphore never stalls the UI thread.
-func (pm *appState) tick() {
-	if pm.isPinging || len(pm.devices) == 0 {
-		return
+// tick sends one round of echo requests: one per device, every interval,
+// unconditionally. It runs on the Fyne main goroutine (invoked via fyne.Do from
+// the ticker goroutine), so reading/snapshotting appState fields and writing the
+// devices' counters here is race-free. The fan-out itself happens on background
+// goroutines so a large device list never stalls the UI thread.
+//
+// Nothing gates this on the previous round having finished, and that is the
+// point. It used to skip a tick while a round was still in flight (an isPinging
+// flag, inherited from the Python version), which quietly made the interval
+// depend on the timeout: with the default 1s interval and 1000ms timeout, one
+// unreachable device stretched the round past the interval and every second tick
+// was dropped, so *every* device — including the reachable ones sharing the
+// round — was probed once per two seconds instead of once per second (measured:
+// 5 requests in 10.4s where 10 were asked for). The interval is now the send
+// cadence and the timeout only decides how long a reply stays valid, which is
+// what both settings say they do.
+//
+// The returned channel is closed once every request in this round has been
+// accounted for; tests wait on it, the ticker ignores it.
+func (pm *appState) tick() <-chan struct{} {
+	done := make(chan struct{})
+	if len(pm.devices) == 0 {
+		close(done)
+		return done
 	}
-	pm.isPinging = true
 
 	devices := pm.devices
 	iface := pm.interfaceName
 	timeout := pm.pingTimeout
+	gen := pm.probeGen
 
-	go runCycle(devices, iface, timeout,
-		func(d *Device) {
-			fyne.Do(func() { pm.updateRowResult(d) })
-		},
-		func() {
-			fyne.Do(func() {
-				pm.isPinging = false
-				pm.refreshStatus()
-			})
-		},
-	)
+	// Total counts requests sent and they are going out now, so it moves here,
+	// for every device in the same pass over the list. That is what keeps the
+	// column level across the table: Success and Fail cannot be written at the
+	// same moment, since a reachable device answers in about a millisecond while
+	// an unanswered one is only known to have failed a whole timeout later.
+	for _, d := range devices {
+		d.Total++
+		pm.updateRowResult(d)
+	}
+	pm.refreshStatus()
+
+	var pending atomic.Int64
+	pending.Store(int64(len(devices)))
+	go probeDevices(devices, iface, timeout, pm.probe, func(d *Device, ok bool) {
+		fyne.Do(func() { pm.applyProbeResult(d, ok, gen) })
+		if pending.Add(-1) == 0 {
+			close(done)
+		}
+	})
+	return done
+}
+
+// applyProbeResult records the outcome of one request. It runs on the UI
+// goroutine (via fyne.Do), which is what makes it safe for overlapping rounds to
+// report on the same device: this and tick are the only writers of a device's
+// counters, and they never run concurrently.
+//
+// gen is the probe generation the request was sent in. Clear zeroes the Totals
+// that in-flight requests were counted in and bumps the generation, so their
+// outcomes have to be dropped — letting them land would leave Success+Fail
+// ahead of a Total that no longer includes them.
+func (pm *appState) applyProbeResult(d *Device, ok bool, gen uint64) {
+	if gen != pm.probeGen || pm.indexOf(d) < 0 {
+		return
+	}
+
+	d.LastResult = ok
+	if ok {
+		d.Success++
+	} else {
+		d.Fail++
+	}
+	pm.updateRowResult(d)
+	pm.refreshStatus()
 }
